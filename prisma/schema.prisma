@@ -1,0 +1,293 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum ProjectRole {
+  OWNER
+  EDITOR
+  VIEWER
+}
+
+enum UploadStatus {
+  PENDING
+  SCANNING
+  READY
+  REJECTED
+  DELETED
+}
+
+enum ConversionStatus {
+  QUEUED
+  RUNNING
+  BLOCKED
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+enum StageStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  BLOCKED
+  FAILED
+  CANCELLED
+}
+
+enum ArtifactStatus {
+  READY
+  DELETED
+}
+
+enum SourceType {
+  REACT_NEXT_ZIP
+  FIGMA
+  FRAMER
+  SCREENSHOT
+}
+
+enum SourcePlatform {
+  FIGMA
+  FRAMER
+}
+
+model User {
+  id           String          @id @default(cuid())
+  email        String          @unique
+  passwordHash String
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+  sessions     Session[]
+  memberships  ProjectMember[]
+  uploads      Upload[]
+  conversions  ConversionJob[]
+  auditEvents  AuditEvent[]
+  sourceImports SourceImport[]
+}
+
+model Session {
+  id        String    @id @default(cuid())
+  userId    String
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+}
+
+model Project {
+  id          String                   @id @default(cuid())
+  name        String
+  createdAt   DateTime                 @default(now())
+  updatedAt   DateTime                 @updatedAt
+  members     ProjectMember[]
+  uploads     Upload[]
+  conversions ConversionJob[]
+  sites       ConnectedWordPressSite[]
+  artifacts   Artifact[]
+  sourceImports SourceImport[]
+}
+
+model ProjectMember {
+  projectId String
+  userId    String
+  role      ProjectRole @default(OWNER)
+  createdAt DateTime    @default(now())
+  project   Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([projectId, userId])
+  @@index([userId, projectId])
+}
+
+model Upload {
+  id          String          @id @default(cuid())
+  projectId   String
+  createdById String
+  storageKey  String          @unique
+  fileName    String
+  contentType String
+  sourceType  SourceType       @default(REACT_NEXT_ZIP)
+  sourceImportId String?
+  detectedFramework String?
+  validation Json?
+  sizeBytes   BigInt
+  sha256      String?
+  status      UploadStatus    @default(PENDING)
+  rejection   String?
+  createdAt   DateTime        @default(now())
+  completedAt DateTime?
+  project     Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdBy   User            @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  sourceImport SourceImport?  @relation(fields: [sourceImportId], references: [id], onDelete: SetNull)
+  conversions ConversionJob[]
+
+  @@index([projectId, createdAt])
+}
+
+enum SourceImportKind {
+  FIGMA_FILE
+  FRAMER_SITE
+}
+
+enum SourceImportStatus {
+  READY
+  FAILED
+}
+
+model SourceImport {
+  id            String            @id @default(cuid())
+  projectId     String
+  createdById   String
+  kind          SourceImportKind
+  status        SourceImportStatus @default(READY)
+  inputUrl      String?
+  fileKey       String?
+  fileName      String?
+  snapshotKey   String?
+  summary       Json?
+  diagnostics   Json?
+  errorCode     String?
+  errorMessage  String?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+  project       Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdBy     User              @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  uploads       Upload[]
+
+  @@index([projectId, createdAt])
+  @@index([projectId, kind, createdAt])
+}
+
+model ConversionJob {
+  id                String                  @id @default(cuid())
+  projectId         String
+  uploadId          String?
+  createdById       String
+  sourcePlatform    SourcePlatform
+  idempotencyKey    String
+  requestHash       String
+  status            ConversionStatus        @default(QUEUED)
+  targetProfile     Json?
+  errorCode         String?
+  errorMessage      String?
+  attempt           Int                     @default(0)
+  availableAt       DateTime                @default(now())
+  lockedAt          DateTime?
+  workerId          String?
+  cancelRequestedAt DateTime?
+  createdAt         DateTime                @default(now())
+  updatedAt         DateTime                @updatedAt
+  project           Project                 @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdBy         User                    @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  upload            Upload?                 @relation(fields: [uploadId], references: [id], onDelete: SetNull)
+  stages            ConversionStage[]
+  ruleVersions      ConversionRuleVersion[]
+  artifacts         Artifact[]
+  validationReport  ValidationReport?
+
+  @@unique([projectId, idempotencyKey])
+  @@index([projectId, createdAt])
+  @@index([status, createdAt])
+  @@index([status, availableAt, createdAt])
+  @@index([status, lockedAt])
+}
+
+model ConversionStage {
+  id           String        @id @default(cuid())
+  conversionId String
+  name         String
+  position     Int
+  status       StageStatus   @default(PENDING)
+  inputHash    String?
+  outputKey    String?
+  diagnostics  Json?
+  startedAt    DateTime?
+  completedAt  DateTime?
+  conversion   ConversionJob @relation(fields: [conversionId], references: [id], onDelete: Cascade)
+
+  @@unique([conversionId, name])
+  @@index([conversionId, status])
+}
+
+model RuleFileVersion {
+  id          String                  @id @default(cuid())
+  fileName    String
+  version     String
+  sha256      String
+  content     String
+  createdAt   DateTime                @default(now())
+  conversions ConversionRuleVersion[]
+
+  @@unique([fileName, sha256])
+  @@index([fileName, createdAt])
+}
+
+model ConversionRuleVersion {
+  conversionId  String
+  ruleVersionId String
+  conversion    ConversionJob   @relation(fields: [conversionId], references: [id], onDelete: Cascade)
+  ruleVersion   RuleFileVersion @relation(fields: [ruleVersionId], references: [id], onDelete: Restrict)
+
+  @@id([conversionId, ruleVersionId])
+}
+
+model Artifact {
+  id           String         @id @default(cuid())
+  projectId    String
+  conversionId String?
+  storageKey   String         @unique
+  fileName     String
+  contentType  String
+  sizeBytes    BigInt
+  sha256       String
+  status       ArtifactStatus @default(READY)
+  createdAt    DateTime       @default(now())
+  project      Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  conversion   ConversionJob? @relation(fields: [conversionId], references: [id], onDelete: SetNull)
+
+  @@index([projectId, createdAt])
+}
+
+model ValidationReport {
+  id           String        @id @default(cuid())
+  conversionId String        @unique
+  diagnostics  Json
+  createdAt    DateTime      @default(now())
+  conversion   ConversionJob @relation(fields: [conversionId], references: [id], onDelete: Cascade)
+}
+
+model ConnectedWordPressSite {
+  id                   String    @id @default(cuid())
+  projectId            String
+  baseUrl              String
+  credentialCiphertext String?
+  verifiedAt           DateTime?
+  capabilities         Json?
+  revokedAt            DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+  project              Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, createdAt])
+}
+
+model AuditEvent {
+  id         String   @id @default(cuid())
+  userId     String?
+  action     String
+  resource   String
+  resourceId String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([resource, resourceId])
+}

@@ -1,0 +1,52 @@
+{
+  "name": "design-to-elementor-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "dev:worker": "tsx watch src/worker.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "start:worker": "node dist/worker.js",
+    "test": "vitest run",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev --name init"
+  },
+  "dependencies": {
+    "@prisma/adapter-pg": "^7.10.0",
+    "@prisma/client": "^7.10.0",
+    "argon2": "^0.41.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.5.0",
+    "express": "^5.1.0",
+    "express-rate-limit": "^7.5.0",
+    "helmet": "^8.1.0",
+    "ipaddr.js": "^2.2.0",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.23.1",
+    "yauzl": "^3.2.0",
+    "zod": "^3.25.49"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.18",
+    "@types/express": "^5.0.2",
+    "@types/jsonwebtoken": "^9.0.9",
+    "@types/node": "^22.15.29",
+    "@types/pg": "^8.23.1",
+    "@types/supertest": "^6.0.3",
+    "@types/yauzl": "^2.10.3",
+    "fflate": "^0.8.3",
+    "fzstd": "^0.1.1",
+    "kiwi-schema": "^0.5.0",
+    "openfig-core": "^0.4.1",
+    "prisma": "^7.10.0",
+    "supertest": "^7.1.1",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.3"
+  }
+}

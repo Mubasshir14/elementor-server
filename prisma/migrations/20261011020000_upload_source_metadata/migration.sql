@@ -1,0 +1,5 @@
+CREATE TYPE "SourceType" AS ENUM ('REACT_NEXT_ZIP', 'FIGMA', 'FRAMER', 'SCREENSHOT');
+
+ALTER TABLE "Upload"
+ADD COLUMN "sourceType" "SourceType" NOT NULL DEFAULT 'REACT_NEXT_ZIP',
+ADD COLUMN "detectedFramework" TEXT;
