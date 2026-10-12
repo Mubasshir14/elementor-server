@@ -6,7 +6,7 @@ export const rulesRouter = Router();
 
 rulesRouter.get("/", requireAuth, async (_req, res) => {
   const files = await Promise.all(
-    ["ELEMENTOR_SKILL.md", "FIGMA.md", "FRAMER.md"].map(async (fileName) => {
+    ["ELEMENTOR_SKILL.md", "FIGMA.md", "FRAMER.md", "REACT_NEXT.md"].map(async (fileName) => {
       const { version, sha256 } = await loadRule(fileName);
       return { fileName, version, sha256 };
     }),

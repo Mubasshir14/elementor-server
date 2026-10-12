@@ -8,6 +8,7 @@ import { HttpError } from "../../middleware/errors.js";
 export const RULE_FILES = {
   figma: "FIGMA.md",
   framer: "FRAMER.md",
+  "react-next-zip": "REACT_NEXT.md",
   target: "ELEMENTOR_SKILL.md",
 } as const;
 
@@ -79,6 +80,7 @@ function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoExcepti
 function sourceRuleFileName(sourceType: ConversionSourceType): string {
   if (sourceType === "figma") return RULE_FILES.figma;
   if (sourceType === "framer") return RULE_FILES.framer;
+  if (sourceType === "react-next-zip") return RULE_FILES["react-next-zip"];
   throw new HttpError(
     400,
     "RULE_FILE_UNSUPPORTED_SOURCE",

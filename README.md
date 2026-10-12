@@ -6,75 +6,81 @@ limits, see [SYSTEM_ARCHITECTURE.md](./SYSTEM_ARCHITECTURE.md).
 
 ## 1. Project Overview
 
-The backend provides authenticated project management and a source-aware intake
-pipeline. It supports three source types, each with its own real import method:
+The backend provides authenticated project management, a source-aware intake
+pipeline, and a Markdown-driven AI conversion pipeline to native Elementor JSON.
+It supports three active source types, each isolated in its own backend module:
 
-- **React / Next.js Project ZIP** — safe archive inspection with automatic
-  framework detection from `package.json` and project structure. Uploaded code
-  is never executed and untrusted dependencies are never installed.
-- **Figma Design** — direct file upload of a **native `.fig`** file (Figma →
-  Save local copy) or a Figma REST API file JSON export. The file is parsed
-  locally with no Figma account, OAuth, file URL, or API token. Native `.fig`
-  files are decoded from their embedded Kiwi schema and node tree.
-- **Framer Project** — published-site URL analysis only. The importer inspects
-  public HTML over HTTPS with SSRF protections and explicitly reports its
-  limitations. It is not native Framer canvas/project recovery.
+- **React / Next.js Project ZIP** (`src/modules/react-nextjs/`) — safe archive
+  inspection (up to 500 MiB compressed, with configurable entry count,
+  uncompressed byte, single-entry, and compression-ratio limits), automatic
+  React vs. Next.js detection from `package.json` and project structure, bounded
+  static source analysis (routes, pages, layouts, UI components, style tokens,
+  headings, copy, buttons, navigation, forms, and assets) without executing
+  uploaded code or installing dependencies, and end-to-end conversion via
+  `REACT_NEXT.md` + `ELEMENTOR_SKILL.md`.
+- **Figma Design** (`src/modules/figma/`) — direct file upload (up to 500 MiB)
+  of a **native `.fig`** file (Figma → Save local copy) or a Figma REST API file
+  JSON export (`.json`). The file is parsed locally with no Figma account,
+  OAuth, file URL, or API token. Native `.fig` files are decoded from their
+  embedded Kiwi schema and node tree (`figma.parser.ts`) and converted via
+  `FIGMA.md` + `ELEMENTOR_SKILL.md`.
+- **Framer Project** (`src/modules/framer/`) — published-site URL analysis only.
+  The importer inspects public HTML over HTTPS with SSRF protections, explicitly
+  reports its limitations, and converts via `FRAMER.md` + `ELEMENTOR_SKILL.md`.
 
-Capabilities are reported by `GET /api/v1/capabilities`. Figma and Framer
-conversions are implemented: `POST /api/v1/projects/:projectId/conversions`
-creates a queued job that the worker runs through the Markdown-driven
-pipeline (source analysis rules → canonical DIR → DIR validation →
-`ELEMENTOR_SKILL.md`-based native Elementor generation → structural output
-validation → private artifact persistence). React/Next.js ZIP and screenshot
-conversions still return HTTP 501 `CONVERSION_PIPELINE_UNAVAILABLE` because no
-source-analysis Markdown rules exist for them yet. The backend never treats
-generic HTML/CSS/JavaScript output as a successful Elementor conversion.
-
-Screenshot intake is explicitly unsupported.
+Capabilities are reported by `GET /api/v1/capabilities`. React/Next.js ZIP,
+Figma, and Framer conversions are implemented:
+`POST /api/v1/projects/:projectId/conversions` creates a queued job that the
+worker runs through the Markdown-driven pipeline (source analysis rules →
+canonical DIR → DIR validation → `ELEMENTOR_SKILL.md`-based native Elementor
+generation → structural output validation → private artifact persistence in
+Backblaze B2 or local dev storage). Screenshot conversions remain unavailable
+(`501 CONVERSION_PIPELINE_UNAVAILABLE`). The backend never treats generic
+HTML/CSS/JavaScript output as a successful Elementor conversion.
 
 ## 2. Technology Stack
 
-- Node.js
-- Express.js
+- Node.js 20.19+
+- Express.js 5
 - TypeScript
-- PostgreSQL
-- Prisma ORM
+- PostgreSQL + Prisma 7 ORM
 - PostgreSQL-backed conversion queue with a separate worker process
-- Local filesystem storage for private uploads and generated files
-- Zod and/or JSON Schema validation
-- A configurable AI provider
-- A custom WordPress plugin/bridge for connected-site operations
+- **Backblaze B2** private S3-compatible object storage (`@aws-sdk/client-s3` +
+  `@aws-sdk/s3-request-presigner`) for production uploads, snapshots, and
+  generated Elementor artifacts (with explicit `STORAGE_PROVIDER=local` adapter
+  retained for local development/testing; never silently falls back in production)
+- Zod schema validation
+- Configurable OpenAI/Groq-compatible AI provider
+- Custom WordPress plugin/bridge verification client
 
-PostgreSQL is the primary database because users, projects, uploads, jobs, rule versions, reports, and artifacts have relationships. Use JSONB for flexible IR and diagnostic payloads. Store large files in the private local storage directory, not directly in database rows.
+PostgreSQL is the system of record for users, projects, uploads, source imports,
+jobs, rule versions, reports, and artifact metadata. Actual file bytes and
+generated Elementor artifacts are stored privately in Backblaze B2 (or the
+local development storage root), never in public folders or database blobs.
 
 ## 3. Backend Responsibilities
 
 1. Authentication and authorization.
-2. Project and upload management.
-3. Safe inspection of uploaded source archives.
-4. React/Next.js ZIP framework detection.
-5. Loading and applying the correct skill/rule files.
-6. Creating and validating Source IR.
-7. Normalizing and optimizing IR.
-8. Resolving the target Elementor capability profile.
-9. Compiling Target IR into Elementor-compatible output.
-10. Validating the output and producing diagnostics.
-11. Storing artifacts and conversion history.
-12. Optionally communicating with a connected WordPress site through the bridge.
+2. Project and upload management (including direct and multipart uploads up to 500 MiB).
+3. Safe inspection and bounded static analysis of uploaded React/Next.js ZIP archives.
+4. Local Kiwi binary and JSON parsing of uploaded `.fig` and `.json` Figma design files.
+5. Loading and applying runtime Markdown skill/rule files (`REACT_NEXT.md`, `FIGMA.md`, `FRAMER.md`, `ELEMENTOR_SKILL.md`).
+6. Creating and validating canonical Source DIR (`dir-schema.ts`).
+7. Generating and structurally validating native Elementor JSON (`elementor-generator.ts`, `elementor-output-schema.ts`).
+8. Persisting private artifacts in Backblaze B2 / storage and recording SHA-256 + byte size in PostgreSQL.
+9. Optionally verifying a connected WordPress site through the bridge.
 
 ## 4. Skill and Rule Files
 
 Keep the conversion knowledge in separate, versioned Markdown files. These files define the rules the AI and conversion pipeline must follow.
 
-Recommended files:
-
 ```text
-backend/
+server/
 ├── rules/
 │   ├── ELEMENTOR_SKILL.md
+│   ├── REACT_NEXT.md
 │   ├── FIGMA.md
-│   ├── FRAMER.md
-│   └── README.md
+│   └── FRAMER.md
 ```
 
 ### `ELEMENTOR_SKILL.md`
@@ -435,6 +441,7 @@ properties the format does not expose become diagnostics, not invented data.
 
 Conversion behavior is driven by the editable Markdown files in `server/rules/`:
 
+- `REACT_NEXT.md` + `ELEMENTOR_SKILL.md` for React / Next.js Project ZIP sources,
 - `FIGMA.md` + `ELEMENTOR_SKILL.md` for Figma sources,
 - `FRAMER.md` + `ELEMENTOR_SKILL.md` for Framer sources.
 
@@ -449,118 +456,97 @@ user payload so uploaded content can never override the trusted rules.
 `server/src/infrastructure/ai/provider.ts` is a thin OpenAI/Groq-compatible
 adapter that sends those rules and returns the model's raw text. The AI produces
 the canonical DIR, which `server/src/modules/conversions/dir-schema.ts` validates
-against the shape documented in `FIGMA.md` §2 (only the allowed node kinds
-`container`, `heading`, `text`, `button`, `image`, `iconBox`, `nav`, `form`).
-`server/src/modules/conversions/conversion-pipeline.ts` orchestrates the stages
-and the worker runs it.
+against the shape documented in `FIGMA.md` §2 and `REACT_NEXT.md` §2 (only the
+allowed node kinds `container`, `heading`, `text`, `button`, `image`, `iconBox`,
+`nav`, `form`). `server/src/modules/conversions/elementor-generator.ts` then
+generates native Elementor JSON under `ELEMENTOR_SKILL.md`, and
+`server/src/modules/conversions/elementor-output-schema.ts` structurally
+validates the output before storing it as a private `Artifact`.
 
-**Conversion-stage dependency:** the DIR is produced and validated, but this
-repository ships **no native Elementor output generator**. The pipeline therefore
-reports `ELEMENTOR_GENERATOR_MISSING` and marks the conversion `BLOCKED` rather
-than emitting fabricated Elementor/HTML output. Supplying the approved Elementor
-generator is the remaining step to complete a conversion end to end.
+### Backblaze B2 object storage and 500 MiB upload support
 
-### Current operational status
+`server/src/modules/storage/` provides the unified `StorageService` abstraction
+with two adapters:
 
-The current API package is run from this directory with `pnpm dev`; the
-background worker is `pnpm dev:worker`. Copy `.env.example` to `.env`, provide
-PostgreSQL and a writable local storage directory, then run
-`pnpm prisma:generate` and `pnpm prisma:migrate`. Do not use production
-credentials for local development. The schema was validated and the Prisma
-client generated; the initial SQL migration was generated offline, but was not
-applied because `DATABASE_URL` was not configured and no local PostgreSQL
-client/service was available. The WordPress credential encryption key must be
-a base64-encoded 32-byte key. Set `TRUST_PROXY_HOPS` only to the exact number
-of trusted reverse proxies in the deployment path. Conversion jobs are
-persisted and claimed through PostgreSQL.
+- `B2StorageService` (`STORAGE_PROVIDER=b2`): Production S3-compatible adapter
+  for Backblaze B2 supporting `putObject`, `getObject`, `headObject`,
+  `deleteObject`, `createPresignedUploadUrl`, `createPresignedDownloadUrl`,
+  `createMultipartUpload`, `createPresignedPartUpload`, `uploadPart`,
+  `completeMultipartUpload`, and `abortMultipartUpload`.
+- `LocalStorageService` (`STORAGE_PROVIDER=local`): Explicit development/test
+  adapter. In `NODE_ENV=production`, `STORAGE_PROVIDER=local` is rejected so the
+  service never silently falls back to local disk when Backblaze B2 is misconfigured.
 
-The backend now uses Prisma 7: database URLs for CLI commands are configured
-in `prisma.config.ts`, and the runtime Prisma Client uses the PostgreSQL driver
-adapter. Use Node.js 20.19 or newer.
+Required Backblaze B2 environment variables when `STORAGE_PROVIDER=b2`:
 
-Implemented versioned routes currently include:
+```dotenv
+STORAGE_PROVIDER=b2
+B2_BUCKET_NAME=design-to-elementor-storage
+B2_ENDPOINT=https://s3.us-east-005.backblazeb2.com
+B2_REGION=us-east-005
+B2_APPLICATION_KEY_ID=your_application_key_id
+B2_APPLICATION_KEY=your_application_key
+B2_PRESIGNED_TTL_SECONDS=900
+UPLOAD_MAX_BYTES=524288000
+```
 
-- `/api/v1/auth/register`, `/login`, `/logout`, and `/me`
-- `/api/v1/projects` and `/api/v1/projects/:projectId`
-- `/api/v1/projects/:projectId/uploads`, `/api/v1/uploads/:uploadId/content`,
-  and `/api/v1/uploads/:uploadId/complete`
-- `/api/v1/projects/:projectId/imports/framer` and
-  `/api/v1/projects/:projectId/imports`
-- `/api/v1/projects/:projectId/conversions` and `/api/v1/conversions/:conversionId`
-- `/api/v1/conversions/:conversionId/stages`, `/reports`, `/retry`, `/cancel`,
-  and `/artifacts`
-- `/api/v1/rules`, `/api/v1/sites`, and `/api/v1/artifacts/:artifactId/download`
-- `/api/v1/health/live` and `/api/v1/health/ready`
+**Backblaze B2 Bucket CORS Configuration (Required for Direct Browser Presigned Uploads):**
+For browser-direct presigned `PUT` uploads and `ETag` reading during multipart uploads, configure CORS on the private bucket (`design-to-elementor-storage`) in the Backblaze B2 Dashboard (or via B2 CLI / S3 `PutBucketCors`):
 
-Registration and login accept `{ "email": "...", "password": "..." }` with a
-minimum 12-character password. Protected routes require a bearer session token.
+```json
+[
+  {
+    "corsRuleName": "design-to-elementor-s3-upload",
+    "allowedOrigins": [
+      "http://localhost:3000"
+    ],
+    "allowedOperations": [
+      "s3_put",
+      "s3_get",
+      "s3_head"
+    ],
+    "allowedHeaders": [
+      "content-type",
+      "content-length",
+      "x-amz-*"
+    ],
+    "exposeHeaders": [
+      "ETag",
+      "x-amz-request-id"
+    ],
+    "maxAgeSeconds": 3600
+  }
+]
+```
 
-### Source import contracts
+- Multipart uploads use 8–10 MiB parts by default so a 500 MiB upload uses at most ~50–63 parts.
+- Expired pending reservations and incomplete multipart uploads are cleaned up via `cleanupExpiredMultipartUploads`.
+
+### Source import and conversion contracts
 
 - **React/Next.js ZIP**: reservation accepts `sourceType: "react-next-zip"`,
   `fileName`, `contentType` (`application/zip` or
-  `application/x-zip-compressed`), and `sizeBytes`. The browser streams the file
-  to the authenticated content endpoint, then calls completion, which validates
-  the archive, detects the framework, and returns `detectedFramework`,
-  `sha256`, and status `READY`.
+  `application/x-zip-compressed`), and `sizeBytes` up to **500 MiB
+  (`524_288_000` bytes)**. Completion validates archive safety (`ZIP_MAX_ENTRIES`,
+  `ZIP_MAX_UNCOMPRESSED_BYTES`, `ZIP_MAX_ENTRY_BYTES`,
+  `ZIP_MAX_COMPRESSION_RATIO`), detects `react` or `nextjs`, performs bounded
+  static source analysis (`analyzeReactNextProjectZip`), persists a
+  `REACT_NEXT_PROJECT` `SourceImport` snapshot in storage, and returns
+  `detectedFramework`, `sha256`, status `READY`, and `sourceImport`.
+  Detailed inspection data is also available at
+  `GET /api/v1/projects/:projectId/react-nextjs/uploads/:uploadId/inspection`.
 - **Figma**: reservation accepts `sourceType: "figma"`, `fileName` ending in
   `.fig` or `.json`, `contentType` (`application/octet-stream` or
-  `application/json`), and `sizeBytes`. The browser streams the file to the
-  authenticated content endpoint, then completion parses it locally — native
-  `.fig` files are decoded from their embedded Kiwi schema and node tree, and
-  `.json` exports are parsed as REST API file JSON — stores it in private
-  storage, and creates a `FIGMA_FILE` source import with observed pages, nodes,
-  components, and styles plus `sha256`. Native `.fig` uploads are supported; no
-  OAuth, file URL, access token, or Figma account connection is required.
-- **Framer**: `POST /projects/:projectId/imports/framer` accepts `{ "siteUrl" }`
-  and performs published-site analysis only, returning explicit diagnostics about
-  what was and was not recovered.
+  `application/json`), and `sizeBytes` up to **500 MiB (`524_288_000` bytes)**.
+  Completion parses the file locally (`figma.parser.ts`) and creates a
+  `FIGMA_FILE` `SourceImport` with observed pages, frames, nodes, components,
+  variants, Auto Layout, and styles. No OAuth, file URL, access token, or Figma
+  account connection is required.
+- **Framer**: `POST /api/v1/projects/:projectId/imports/framer` accepts
+  `{ "siteUrl" }` and performs published-site HTML analysis over HTTPS with SSRF
+  protections.
+- **Conversions**: `POST /api/v1/projects/:projectId/conversions` queues a job
+  for `react-next-zip`, `figma`, or `framer` with the current Markdown rule
+  snapshots (`REACT_NEXT.md`/`FIGMA.md`/`FRAMER.md` + `ELEMENTOR_SKILL.md`) and
+  persists the validated native Elementor JSON artifact privately.
 
-Conversion creation accepts `sourceType`, an optional `detectedFramework`
-(React/Next.js), an optional `sourceImportId` (Figma/Framer), `uploadId`
-(React/Next.js), `idempotencyKey`, and a `targetProfile` containing
-`platform: "elementor"`, `architecture`, and `licenseMode`. These target-profile
-values are requests only; they are not a claim that an architecture, widget,
-license, or Elementor version is supported. Figma and Framer conversions create
-a `QUEUED` job with the current Markdown rule snapshots persisted; React/Next.js
-and screenshot conversions return HTTP 501 `CONVERSION_PIPELINE_UNAVAILABLE`
-and create no job. Reusing an idempotency key with the same request replays the
-original job (200, `idempotentReplay: true`); a different request returns
-`409 IDEMPOTENCY_KEY_REUSED`.
-
-Conversion jobs record the selected rule snapshots, exact SHA-256 hashes,
-stages, and diagnostics. The worker runs the Markdown-driven pipeline:
-
-1. loads `FIGMA.md`/`FRAMER.md` and `ELEMENTOR_SKILL.md` at conversion time
-   (cache invalidated on file edit via mtime + content hash, so rule edits
-   affect subsequent conversions without code changes),
-2. asks the AI to interpret the parsed source snapshot into the canonical DIR,
-3. validates the DIR against `dir-schema.ts` (the documented envelope and node
-   kinds from FIGMA.md §2); an invalid DIR blocks the job at
-   `source_ir_validation` and never reaches the generator,
-4. asks the AI to generate native Elementor JSON from the validated DIR using
-   the current `ELEMENTOR_SKILL.md` as trusted system instructions with the
-   DIR framed as untrusted data,
-5. validates the generated Elementor output structurally with
-   `elementor-output-schema.ts` (root `content` array, per-element `id`,
-   `elType`, `settings`, nested `elements`, unique ids, actionable
-   path diagnostics),
-6. only after validation succeeds, writes the output to private local storage
-   and creates the `Artifact` record (actual size and SHA-256), then marks the
-   conversion `SUCCEEDED` with the `target_ir_generation` stage recording the
-   output key.
-
-The AI provider is read at call time from `AI_PROVIDER`/`AI_API_KEY`/
-`AI_MODEL`; when disabled the job fails with `AI_PROVIDER_DISABLED` instead of
-producing fabricated output, and provider, JSON-extraction, or structural
-failures fail the job truthfully. Storage or artifact-persistence failures mark
-the job `FAILED` and leave no dangling artifact record. The backend never emits
-a generic HTML/CSS/JavaScript fallback in place of native Elementor JSON.
-
-The WordPress API stores credentials encrypted at rest and verifies sites
-through the custom bridge capability endpoint
-`/wp-json/design-to-elementor/v1/capabilities`. The corresponding WordPress
-plugin is not present in this workspace, and native document writes remain
-disabled until the bridge and exact installed Elementor capabilities have been
-verified. Publishing returns an explicit `NATIVE_PUBLISH_ADAPTER_UNVERIFIED`
-error rather than claiming compatibility.

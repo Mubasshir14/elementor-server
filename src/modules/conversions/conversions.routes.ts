@@ -46,7 +46,7 @@ conversionsRouter.post("/projects/:projectId/conversions", async (req, res) => {
   const projectId = z.string().cuid().parse(req.params.projectId);
   const userId = authenticatedUserId(req);
   await requireProjectRole(projectId, userId, [ProjectRole.OWNER, ProjectRole.EDITOR]);
-  if (body.sourceType === "react-next-zip" || body.sourceType === "screenshot") {
+  if (body.sourceType === "screenshot") {
     throw new HttpError(
       501,
       "CONVERSION_PIPELINE_UNAVAILABLE",
@@ -54,39 +54,124 @@ conversionsRouter.post("/projects/:projectId/conversions", async (req, res) => {
     );
   }
 
-  if (!body.sourceImportId) {
-    throw new HttpError(400, "SOURCE_IMPORT_REQUIRED", "Figma and Framer conversions require a validated source import reference");
-  }
-  const sourceImport = await prisma.sourceImport.findFirst({
-    where: { id: body.sourceImportId, projectId, status: "READY" },
-    select: { id: true, kind: true },
-  });
-  if (!sourceImport) {
-    throw new HttpError(400, "SOURCE_IMPORT_NOT_READY", "Conversion requires a ready Figma or Framer import in this project");
-  }
-  const expectedKind = body.sourceType === "figma" ? "FIGMA_FILE" : "FRAMER_SITE";
-  if (sourceImport.kind !== expectedKind) {
-    throw new HttpError(400, "SOURCE_IMPORT_MISMATCH", "Conversion source settings must match the validated import.");
-  }
   let resolvedUploadId: string | null = null;
-  if (body.uploadId) {
+  let resolvedSourceImportId: string | null = body.sourceImportId ?? null;
+  let sourcePlatform: "REACT_NEXT_ZIP" | "FIGMA" | "FRAMER";
+
+  if (body.sourceType === "react-next-zip") {
+    if (!body.uploadId) {
+      throw new HttpError(
+        400,
+        "UPLOAD_REQUIRED",
+        "React/Next.js conversions require a validated upload reference",
+      );
+    }
     const upload = await prisma.upload.findFirst({
-      where: { id: body.uploadId, projectId, sourceImportId: sourceImport.id, status: UploadStatus.READY },
-      select: { id: true },
+      where: {
+        id: body.uploadId,
+        projectId,
+        sourceType: "REACT_NEXT_ZIP",
+        status: UploadStatus.READY,
+      },
+      select: {
+        id: true,
+        sourceType: true,
+        detectedFramework: true,
+        sourceImportId: true,
+      },
     });
     if (!upload) {
-      throw new HttpError(400, "UPLOAD_SOURCE_MISMATCH", "The upload reference must belong to the validated source import.");
+      throw new HttpError(
+        400,
+        "UPLOAD_NOT_READY",
+        "Conversion requires a ready React or Next.js project upload in this project",
+      );
+    }
+    if (
+      body.detectedFramework &&
+      upload.detectedFramework &&
+      body.detectedFramework !== upload.detectedFramework
+    ) {
+      throw new HttpError(
+        400,
+        "FRAMEWORK_MISMATCH",
+        "Conversion framework settings must match the detected project framework.",
+      );
+    }
+    if (body.sourceImportId) {
+      const sourceImport = await prisma.sourceImport.findFirst({
+        where: { id: body.sourceImportId, projectId, status: "READY" },
+        select: { id: true, kind: true },
+      });
+      if (!sourceImport || sourceImport.kind !== "REACT_NEXT_PROJECT") {
+        throw new HttpError(
+          400,
+          "SOURCE_IMPORT_MISMATCH",
+          "Conversion source settings must match the validated React/Next.js import.",
+        );
+      }
+      resolvedSourceImportId = sourceImport.id;
+    } else if (upload.sourceImportId) {
+      resolvedSourceImportId = upload.sourceImportId;
     }
     resolvedUploadId = upload.id;
+    sourcePlatform = "REACT_NEXT_ZIP";
+  } else {
+    if (!body.sourceImportId) {
+      throw new HttpError(
+        400,
+        "SOURCE_IMPORT_REQUIRED",
+        "Figma and Framer conversions require a validated source import reference",
+      );
+    }
+    const sourceImport = await prisma.sourceImport.findFirst({
+      where: { id: body.sourceImportId, projectId, status: "READY" },
+      select: { id: true, kind: true },
+    });
+    if (!sourceImport) {
+      throw new HttpError(
+        400,
+        "SOURCE_IMPORT_NOT_READY",
+        "Conversion requires a ready Figma or Framer import in this project",
+      );
+    }
+    const expectedKind = body.sourceType === "figma" ? "FIGMA_FILE" : "FRAMER_SITE";
+    if (sourceImport.kind !== expectedKind) {
+      throw new HttpError(
+        400,
+        "SOURCE_IMPORT_MISMATCH",
+        "Conversion source settings must match the validated import.",
+      );
+    }
+    if (body.uploadId) {
+      const upload = await prisma.upload.findFirst({
+        where: {
+          id: body.uploadId,
+          projectId,
+          sourceImportId: sourceImport.id,
+          status: UploadStatus.READY,
+        },
+        select: { id: true },
+      });
+      if (!upload) {
+        throw new HttpError(
+          400,
+          "UPLOAD_SOURCE_MISMATCH",
+          "The upload reference must belong to the validated source import.",
+        );
+      }
+      resolvedUploadId = upload.id;
+    }
+    resolvedSourceImportId = sourceImport.id;
+    sourcePlatform = body.sourceType === "figma" ? "FIGMA" : "FRAMER";
   }
 
-  const sourcePlatform = body.sourceType === "figma" ? "FIGMA" : "FRAMER";
   const requestHash = createHash("sha256")
     .update(
       JSON.stringify({
         sourceType: body.sourceType,
         detectedFramework: body.detectedFramework ?? null,
-        sourceImportId: body.sourceImportId ?? null,
+        sourceImportId: resolvedSourceImportId,
         uploadId: resolvedUploadId,
         targetProfile: body.targetProfile,
       }),

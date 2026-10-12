@@ -17,6 +17,8 @@
     "prisma:migrate": "prisma migrate dev --name init"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1149.0",
+    "@aws-sdk/s3-request-presigner": "^3.1149.0",
     "@prisma/adapter-pg": "^7.10.0",
     "@prisma/client": "^7.10.0",
     "argon2": "^0.41.1",
@@ -24,9 +26,12 @@
     "dotenv": "^16.5.0",
     "express": "^5.1.0",
     "express-rate-limit": "^7.5.0",
+    "fflate": "^0.8.3",
+    "fzstd": "^0.1.1",
     "helmet": "^8.1.0",
     "ipaddr.js": "^2.2.0",
     "jsonwebtoken": "^9.0.2",
+    "kiwi-schema": "^0.5.0",
     "pg": "^8.23.1",
     "yauzl": "^3.2.0",
     "zod": "^3.25.49"
@@ -39,9 +44,6 @@
     "@types/pg": "^8.23.1",
     "@types/supertest": "^6.0.3",
     "@types/yauzl": "^2.10.3",
-    "fflate": "^0.8.3",
-    "fzstd": "^0.1.1",
-    "kiwi-schema": "^0.5.0",
     "openfig-core": "^0.4.1",
     "prisma": "^7.10.0",
     "supertest": "^7.1.1",

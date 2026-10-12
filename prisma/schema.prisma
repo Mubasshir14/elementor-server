@@ -52,6 +52,7 @@ enum SourceType {
 }
 
 enum SourcePlatform {
+  REACT_NEXT_ZIP
   FIGMA
   FRAMER
 }
@@ -107,31 +108,35 @@ model ProjectMember {
 }
 
 model Upload {
-  id          String          @id @default(cuid())
-  projectId   String
-  createdById String
-  storageKey  String          @unique
-  fileName    String
-  contentType String
-  sourceType  SourceType       @default(REACT_NEXT_ZIP)
-  sourceImportId String?
+  id                String          @id @default(cuid())
+  projectId         String
+  createdById       String
+  storageKey        String          @unique
+  fileName          String
+  contentType       String
+  sourceType        SourceType      @default(REACT_NEXT_ZIP)
+  sourceImportId    String?
   detectedFramework String?
-  validation Json?
-  sizeBytes   BigInt
-  sha256      String?
-  status      UploadStatus    @default(PENDING)
-  rejection   String?
-  createdAt   DateTime        @default(now())
-  completedAt DateTime?
-  project     Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  createdBy   User            @relation(fields: [createdById], references: [id], onDelete: Restrict)
-  sourceImport SourceImport?  @relation(fields: [sourceImportId], references: [id], onDelete: SetNull)
-  conversions ConversionJob[]
+  validation        Json?
+  sizeBytes         BigInt
+  sha256            String?
+  multipartUploadId String?
+  expiresAt         DateTime?
+  status            UploadStatus    @default(PENDING)
+  rejection         String?
+  createdAt         DateTime        @default(now())
+  completedAt       DateTime?
+  project           Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdBy         User            @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  sourceImport      SourceImport?   @relation(fields: [sourceImportId], references: [id], onDelete: SetNull)
+  conversions       ConversionJob[]
 
   @@index([projectId, createdAt])
+  @@index([status, expiresAt])
 }
 
 enum SourceImportKind {
+  REACT_NEXT_PROJECT
   FIGMA_FILE
   FRAMER_SITE
 }

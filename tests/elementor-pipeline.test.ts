@@ -495,10 +495,8 @@ describe("Conversion creation API (job + stages + persisted rules)", () => {
       .post(`/api/v1/projects/${PROJECT_ID}/conversions`)
       .set("Authorization", `Bearer ${token}`)
       .send({
-        sourceType: "react-next-zip",
-        detectedFramework: "nextjs",
-        uploadId: "00000000-0000-4000-8000-000000000000",
-        idempotencyKey: "idem-key-react-501-1",
+        sourceType: "screenshot",
+        idempotencyKey: "idem-key-screenshot-501-1",
         targetProfile: { platform: "elementor", architecture: "atomic", licenseMode: "free" },
       });
 

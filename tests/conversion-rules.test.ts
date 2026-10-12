@@ -93,9 +93,17 @@ describe("rule cache invalidation and missing rules", () => {
     }
   });
 
+  it("loads REACT_NEXT.md + ELEMENTOR_SKILL.md for react-next-zip conversions", () => {
+    resetRuleCacheForTests();
+    const rules = loadConversionRules("react-next-zip");
+    expect(rules.sourceRule.fileName).toBe("REACT_NEXT.md");
+    expect(rules.targetRule.fileName).toBe("ELEMENTOR_SKILL.md");
+    expect(rules.systemInstructions).toContain("React / Next.js → DIR Conversion Skill");
+  });
+
   it("rejects an unsupported source type instead of guessing a rule file", () => {
     resetRuleCacheForTests();
-    expect(() => loadConversionRules("react-next-zip" as never)).toThrowError(/source-analysis rule file/i);
+    expect(() => loadConversionRules("screenshot" as never)).toThrowError(/source-analysis rule file/i);
   });
 });
 

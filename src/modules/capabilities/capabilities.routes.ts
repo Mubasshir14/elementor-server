@@ -1,14 +1,24 @@
 import { Router } from "express";
-import {
-  capabilitiesResponseSchema,
-} from "./capabilities.schema.js";
+import { capabilitiesResponseSchema } from "./capabilities.schema.js";
 import { env } from "../../config/env.js";
 import { authenticatedUserId } from "../auth/auth.middleware.js";
+import {
+  evaluateSourceAvailability,
+  evaluateTargetAvailability,
+} from "./capabilities.availability.js";
 
 export const capabilitiesRouter = Router();
 
 capabilitiesRouter.get("/", async (req, res) => {
   authenticatedUserId(req);
+
+  // Runtime availability — never hardcoded. Each source reports whether its own
+  // Markdown rules, the AI provider, and storage are actually usable.
+  const react = evaluateSourceAvailability("react-next-zip");
+  const figma = evaluateSourceAvailability("figma");
+  const framer = evaluateSourceAvailability("framer");
+  const target = evaluateTargetAvailability();
+
   const capabilities = capabilitiesResponseSchema.parse({
     sourceTypes: [
       {
@@ -18,8 +28,8 @@ capabilitiesRouter.get("/", async (req, res) => {
         acceptedFormats: [".zip"],
         maxBytes: env.UPLOAD_MAX_BYTES,
         frameworkAutoDetection: true,
-        conversionAvailable: false,
-        unavailableReason: "Source intake and framework detection are implemented; conversion is disabled until the approved DIR and Elementor compiler are available.",
+        conversionAvailable: react.available,
+        unavailableReason: react.unavailableReason ?? "React/Next.js ZIP conversion is available.",
         importMethod: "zip-upload",
         authorization: { type: "none", connected: false, scopes: [] },
       },
@@ -30,8 +40,8 @@ capabilitiesRouter.get("/", async (req, res) => {
         acceptedFormats: [".fig", ".json"],
         maxBytes: env.UPLOAD_MAX_BYTES,
         frameworkAutoDetection: false,
-        conversionAvailable: false,
-        unavailableReason: "Native .fig files and Figma REST API file JSON exports are uploaded directly and parsed locally. No Figma account, OAuth, file URL, or API token is required. Conversion remains disabled until the approved DIR and Elementor compiler are available.",
+        conversionAvailable: figma.available,
+        unavailableReason: figma.unavailableReason ?? "Figma conversion is available.",
         importMethod: "file-upload",
         authorization: { type: "none", connected: false, scopes: [] },
       },
@@ -42,8 +52,8 @@ capabilitiesRouter.get("/", async (req, res) => {
         acceptedFormats: [],
         maxBytes: null,
         frameworkAutoDetection: false,
-        conversionAvailable: false,
-        unavailableReason: "Framer import supports published-site URL analysis only; conversion remains disabled until the approved DIR and Elementor compiler are available.",
+        conversionAvailable: framer.available,
+        unavailableReason: framer.unavailableReason ?? "Framer conversion is available.",
         importMethod: "published-site-url",
         authorization: { type: "none", connected: false, scopes: [] },
       },
@@ -62,12 +72,13 @@ capabilitiesRouter.get("/", async (req, res) => {
     ],
     target: {
       platform: "elementor",
-      status: "unavailable",
+      status: target.available ? "available" : "unavailable",
       architectures: [],
       licenseModes: [],
-      unavailableReason: "The canonical DIR schema and Elementor compilation pipeline are not present in this repository.",
+      unavailableReason: target.unavailableReason ?? "Native Elementor conversion is available.",
     },
     defaults: null,
   });
   res.json(capabilities);
 });
+

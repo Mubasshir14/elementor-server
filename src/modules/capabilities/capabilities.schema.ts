@@ -55,7 +55,7 @@ export const capabilitiesResponseSchema = z.object({
   }).strict()).length(sourceTypes.length),
   target: z.object({
     platform: z.literal("elementor"),
-    status: z.literal("unavailable"),
+    status: z.enum(["available", "unavailable"]),
     architectures: z.array(z.enum(elementorArchitectures)).length(0),
     licenseModes: z.array(z.enum(elementorLicenseModes)).length(0),
     unavailableReason: z.string().min(1),
@@ -77,7 +77,6 @@ export const capabilitiesResponseSchema = z.object({
         source.acceptedFormats[0] !== ".zip" ||
         source.maxBytes === null ||
         !source.frameworkAutoDetection ||
-        source.conversionAvailable ||
         !source.unavailableReason ||
         source.importMethod !== "zip-upload" ||
         source.authorization.type !== "none" ||
@@ -100,7 +99,6 @@ export const capabilitiesResponseSchema = z.object({
         !hasFig || !hasJson || figmaFormats.length !== 2 ||
         source.maxBytes === null ||
         source.frameworkAutoDetection ||
-        source.conversionAvailable ||
         !source.unavailableReason ||
         source.importMethod !== "file-upload" ||
         source.authorization.type !== "none" ||
@@ -120,7 +118,6 @@ export const capabilitiesResponseSchema = z.object({
         source.acceptedFormats.length !== 0 ||
         source.maxBytes !== null ||
         source.frameworkAutoDetection ||
-        source.conversionAvailable ||
         !source.unavailableReason ||
         source.importMethod !== "published-site-url" ||
         source.authorization.type !== "none" ||

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { prisma } from "../../infrastructure/database/prisma.js";
 import { HttpError } from "../../middleware/errors.js";
 
-export type SourcePlatform = "figma" | "framer";
+export type SourcePlatform = "figma" | "framer" | "react-next-zip";
 
 export interface LoadedRule {
   fileName: string;
@@ -18,6 +18,7 @@ const allowedRuleFiles = new Set([
   "ELEMENTOR_SKILL.md",
   "FIGMA.md",
   "FRAMER.md",
+  "REACT_NEXT.md",
 ]);
 const rulesDirectory = fileURLToPath(new URL("../../../rules/", import.meta.url));
 
@@ -44,7 +45,13 @@ export async function loadRule(fileName: string): Promise<LoadedRule> {
 }
 
 export async function loadRulesForConversion(source: SourcePlatform): Promise<LoadedRule[]> {
-  const files = ["ELEMENTOR_SKILL.md", source === "figma" ? "FIGMA.md" : "FRAMER.md"];
+  const sourceFile =
+    source === "figma"
+      ? "FIGMA.md"
+      : source === "framer"
+        ? "FRAMER.md"
+        : "REACT_NEXT.md";
+  const files = ["ELEMENTOR_SKILL.md", sourceFile];
   return Promise.all(files.map(loadRule));
 }
 

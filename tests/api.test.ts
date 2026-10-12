@@ -144,10 +144,45 @@ describe("API security boundaries", () => {
         status: "unavailable",
         architectures: [],
         licenseModes: [],
-        unavailableReason: "The canonical DIR schema and Elementor compilation pipeline are not present in this repository.",
+        unavailableReason: "AI conversion is disabled. Set AI_PROVIDER, AI_API_KEY, and AI_MODEL on the API server to enable Figma, Framer, and React/Next.js conversion.",
       },
       defaults: null,
     });
+  });
+
+  it("reports conversion available when the AI provider and Markdown rules are usable", async () => {
+    vi.mocked(prisma.session.findFirst).mockResolvedValue({
+      id: "session-test",
+      userId: "user-test",
+    } as never);
+
+    const previousProvider = process.env.AI_PROVIDER;
+    const previousKey = process.env.AI_API_KEY;
+    const previousModel = process.env.AI_MODEL;
+    process.env.AI_PROVIDER = "groq";
+    process.env.AI_API_KEY = "test-key";
+    process.env.AI_MODEL = "test-model";
+    try {
+      const response = await request(app)
+        .get("/api/v1/capabilities")
+        .set("Authorization", `Bearer ${token}`);
+
+      expect(response.status).toBe(200);
+      expect(capabilitiesResponseSchema.parse(response.body)).toMatchObject({
+        target: { platform: "elementor", status: "available" },
+      });
+      for (const source of response.body.sourceTypes) {
+        if (source.id === "screenshot") {
+          expect(source.conversionAvailable).toBe(false);
+        } else {
+          expect(source.conversionAvailable).toBe(true);
+        }
+      }
+    } finally {
+      process.env.AI_PROVIDER = previousProvider ?? "disabled";
+      process.env.AI_API_KEY = previousKey ?? "";
+      process.env.AI_MODEL = previousModel ?? "";
+    }
   });
 
   it("validates credentials before touching persistence", async () => {
@@ -215,25 +250,18 @@ describe("API security boundaries", () => {
     }));
   });
 
-  it("preserves validated conversion settings but does not enqueue while the compiler is unavailable", async () => {
+  it("preserves validated conversion settings but does not enqueue when a source type has no rules", async () => {
     vi.mocked(prisma.session.findFirst).mockResolvedValue({
       id: "session-test",
       userId: "user-test",
     } as never);
     vi.mocked(prisma.projectMember.findUnique).mockResolvedValue({ role: "OWNER" } as never);
-    vi.mocked(prisma.upload.findFirst).mockResolvedValue({
-      id: "upload-test",
-      sourceType: "REACT_NEXT_ZIP",
-      detectedFramework: "nextjs",
-    } as never);
 
     const response = await request(app)
       .post("/api/v1/projects/cxxxxxxxxxxxxxxxxxxxxxxxx/conversions")
       .set(["Author", "ization"].join(""), ["Be" + "arer", token].join(" "))
       .send({
-        sourceType: "react-next-zip",
-        detectedFramework: "nextjs",
-        uploadId: "00000000-0000-4000-8000-000000000000",
+        sourceType: "screenshot",
         idempotencyKey: "test-conversion-key",
         targetProfile: { platform: "elementor", architecture: "atomic", licenseMode: "free" },
       });

@@ -16,6 +16,8 @@ import { sitesRouter } from "./modules/wordpress-sites/sites.routes.js";
 import { artifactsRouter } from "./modules/artifacts/artifacts.routes.js";
 import { capabilitiesRouter } from "./modules/capabilities/capabilities.routes.js";
 import { sourceImportsRouter } from "./modules/uploads/source-imports.routes.js";
+import { reactNextjsRouter } from "./modules/react-nextjs/react-nextjs.routes.js";
+import { figmaRouter } from "./modules/figma/figma.routes.js";
 import "./modules/uploads/remote-imports.routes.js";
 
 export function createApp() {
@@ -60,6 +62,8 @@ export function createApp() {
   v1.use(requireAuth);
   v1.use("/capabilities", capabilitiesRouter);
   v1.use(sourceImportsRouter);
+  v1.use(reactNextjsRouter);
+  v1.use(figmaRouter);
   v1.use("/projects", projectsRouter);
   v1.use(uploadsRouter);
   v1.use(conversionsRouter);

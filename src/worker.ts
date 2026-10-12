@@ -10,6 +10,11 @@ import {
   recoverStaleConversions,
 } from "./infrastructure/queue/postgres-jobs.js";
 import { runConversionPipeline, persistElementorArtifact } from "./modules/conversions/conversion-pipeline.js";
+import {
+  analyzeReactNextProjectZip,
+  persistReactNextImport,
+} from "./modules/react-nextjs/react-nextjs.service.js";
+import { cleanupExpiredMultipartUploads } from "./modules/uploads/uploads.routes.js";
 
 const POLL_INTERVAL_MS = 1_000;
 const RECOVERY_INTERVAL_MS = 15_000;
@@ -48,7 +53,7 @@ async function cancelIfRequested(conversionId: string, workerId: string): Promis
   return true;
 }
 
-async function processConversion(conversionId: string, workerId: string): Promise<void> {
+export async function processConversion(conversionId: string, workerId: string): Promise<void> {
   let leaseLost = false;
   const heartbeat = setInterval(() => {
     void heartbeatConversion(conversionId, workerId)
@@ -70,10 +75,10 @@ async function processConversion(conversionId: string, workerId: string): Promis
       include: { upload: true },
     });
     if (!conversion || conversion.workerId !== workerId) return;
-    if (!conversion.upload || conversion.upload.status !== UploadStatus.READY) {
+    if (conversion.upload && conversion.upload.status !== UploadStatus.READY) {
       throw new Error("Conversion upload is not ready");
     }
-    const uploadSha256 = conversion.upload.sha256;
+    const uploadSha256 = conversion.upload?.sha256 ?? conversion.requestHash;
 
     const inspection = await prisma.conversionStage.update({
       where: { conversionId_name: { conversionId, name: "source_inspection" } },
@@ -92,53 +97,94 @@ async function processConversion(conversionId: string, workerId: string): Promis
     });
     if (leaseLost || await cancelIfRequested(conversionId, workerId)) return;
 
-    // Run the Markdown-driven conversion pipeline for Figma/Framer sources.
-    // React/Next.js keeps the original blocked behavior (no source-analysis rule
-    // file exists for it yet). The pipeline loads rules at conversion time, asks
-    // the AI for a DIR, validates it, then generates native Elementor output.
     let pipelineResult: Awaited<ReturnType<typeof runConversionPipeline>> | null = null;
-    if (conversion.upload.sourceImportId) {
-      const sourceImport = await prisma.sourceImport.findUnique({
+    let resolvedImport: { snapshotKey: string | null; kind: string } | null = null;
+
+    if (conversion.upload?.sourceImportId) {
+      resolvedImport = await prisma.sourceImport.findUnique({
         where: { id: conversion.upload.sourceImportId },
         select: { snapshotKey: true, kind: true },
       });
-      if (sourceImport?.snapshotKey && (sourceImport.kind === "FIGMA_FILE" || sourceImport.kind === "FRAMER_SITE")) {
-        try {
-          pipelineResult = await runConversionPipeline(
-            {
-              sourceType: sourceImport.kind === "FIGMA_FILE" ? "figma" : "framer",
-              snapshotKey: sourceImport.snapshotKey,
-            },
-            sourceImport.snapshotKey,
-            {
-              projectId: conversion.projectId,
-              conversionId: conversion.id,
-              sourceType: sourceImport.kind === "FIGMA_FILE" ? "figma" : "framer",
-            },
-          );
-        } catch (error) {
-          // Actionable pipeline error (disabled AI, missing key, unreachable
-          // provider, unparseable source): mark FAILED with a truthful code.
-          const code = (error as { code?: string }).code ?? "CONVERSION_FAILED";
-          const message = error instanceof Error ? error.message : "Conversion failed";
-          await prisma.$transaction(async (tx) => {
-            const owned = await tx.conversionJob.updateMany({
-              where: { id: conversionId, status: "RUNNING", workerId },
-              data: { status: "FAILED", errorCode: code, errorMessage: message, workerId: null, lockedAt: null },
-            });
-            if (owned.count === 0) return;
-            await tx.conversionStage.updateMany({
-              where: { conversionId, status: { in: [StageStatus.PENDING, StageStatus.RUNNING] } },
-              data: { status: StageStatus.FAILED, completedAt: new Date() },
-            });
-            await tx.validationReport.upsert({
-              where: { conversionId },
-              create: { conversionId, diagnostics: [{ code, severity: "error", message, stage: "conversion" }] },
-              update: { diagnostics: [{ code, severity: "error", message, stage: "conversion" }] },
-            });
+    } else if (
+      conversion.upload &&
+      conversion.upload.sourceType === "REACT_NEXT_ZIP"
+    ) {
+      const zipBytes = await storage.readFile(conversion.upload.storageKey);
+      const { snapshot } = await analyzeReactNextProjectZip(zipBytes);
+      const persisted = await persistReactNextImport({
+        projectId: conversion.projectId,
+        userId: conversion.createdById,
+        uploadId: conversion.upload.id,
+        fileName: conversion.upload.fileName,
+        snapshot,
+      });
+      await prisma.upload.update({
+        where: { id: conversion.upload.id },
+        data: { sourceImportId: persisted.sourceImport.id },
+      });
+      resolvedImport = {
+        snapshotKey: persisted.snapshotStorageKey,
+        kind: "REACT_NEXT_PROJECT",
+      };
+    } else if (!conversion.upload) {
+      const expectedKind =
+        conversion.sourcePlatform === "FIGMA"
+          ? "FIGMA_FILE"
+          : conversion.sourcePlatform === "FRAMER"
+            ? "FRAMER_SITE"
+            : "REACT_NEXT_PROJECT";
+      resolvedImport = await prisma.sourceImport.findFirst({
+        where: { projectId: conversion.projectId, kind: expectedKind, status: "READY" },
+        orderBy: { createdAt: "desc" },
+        select: { snapshotKey: true, kind: true },
+      });
+    }
+
+    if (
+      resolvedImport?.snapshotKey &&
+      (resolvedImport.kind === "FIGMA_FILE" ||
+        resolvedImport.kind === "FRAMER_SITE" ||
+        resolvedImport.kind === "REACT_NEXT_PROJECT")
+    ) {
+      const pipelineSourceType =
+        resolvedImport.kind === "FIGMA_FILE"
+          ? "figma"
+          : resolvedImport.kind === "FRAMER_SITE"
+            ? "framer"
+            : "react-next-zip";
+      try {
+        pipelineResult = await runConversionPipeline(
+          {
+            sourceType: pipelineSourceType,
+            snapshotKey: resolvedImport.snapshotKey,
+          },
+          resolvedImport.snapshotKey,
+          {
+            projectId: conversion.projectId,
+            conversionId: conversion.id,
+            sourceType: pipelineSourceType,
+          },
+        );
+      } catch (error) {
+        const code = (error as { code?: string }).code ?? "CONVERSION_FAILED";
+        const message = error instanceof Error ? error.message : "Conversion failed";
+        await prisma.$transaction(async (tx) => {
+          const owned = await tx.conversionJob.updateMany({
+            where: { id: conversionId, status: "RUNNING", workerId },
+            data: { status: "FAILED", errorCode: code, errorMessage: message, workerId: null, lockedAt: null },
           });
-          return;
-        }
+          if (owned.count === 0) return;
+          await tx.conversionStage.updateMany({
+            where: { conversionId, status: { in: [StageStatus.PENDING, StageStatus.RUNNING] } },
+            data: { status: StageStatus.FAILED, completedAt: new Date() },
+          });
+          await tx.validationReport.upsert({
+            where: { conversionId },
+            create: { conversionId, diagnostics: [{ code, severity: "error", message, stage: "conversion" }] },
+            update: { diagnostics: [{ code, severity: "error", message, stage: "conversion" }] },
+          });
+        });
+        return;
       }
     }
 
@@ -153,7 +199,7 @@ async function processConversion(conversionId: string, workerId: string): Promis
       : {
           code: "SOURCE_ANALYSIS_RULES_MISSING",
           severity: "error",
-          message: "Conversion stopped because this job has no validated Figma or Framer source import; the Markdown-driven pipeline requires source-analysis rules for the recorded source type.",
+          message: "Conversion stopped because this job has no validated source import; the Markdown-driven pipeline requires a ready source snapshot for the recorded source type.",
           stage: "source_ir_validation",
         };
 
@@ -260,6 +306,7 @@ async function workerLoop(workerId: string): Promise<void> {
     try {
       if (Date.now() - lastRecoveryAt >= RECOVERY_INTERVAL_MS) {
         await recoverStaleConversions(env.CONVERSION_MAX_ATTEMPTS);
+        await cleanupExpiredMultipartUploads().catch(() => undefined);
         lastRecoveryAt = Date.now();
       }
       const conversionId = await claimNextConversion(workerId);
@@ -294,6 +341,13 @@ async function workerLoop(workerId: string): Promise<void> {
   }
 }
 
+export async function processNextPendingConversion(workerId = randomUUID()): Promise<string | null> {
+  const conversionId = await claimNextConversion(workerId);
+  if (!conversionId) return null;
+  await processConversion(conversionId, workerId);
+  return conversionId;
+}
+
 async function startWorker() {
   await storage.ready();
   const loops = Array.from(
@@ -304,18 +358,20 @@ async function startWorker() {
   await prisma.$disconnect();
 }
 
-process.once("SIGINT", () => {
-  stopping = true;
-});
-process.once("SIGTERM", () => {
-  stopping = true;
-});
+if (process.env.NODE_ENV !== "test" && process.env.WORKER_LIBRARY_MODE !== "1") {
+  process.once("SIGINT", () => {
+    stopping = true;
+  });
+  process.once("SIGTERM", () => {
+    stopping = true;
+  });
 
-void startWorker().catch((error: unknown) => {
-  console.error(
-    "PostgreSQL conversion worker stopped unexpectedly",
-    error instanceof Error ? error.message : "unknown",
-  );
-  process.exitCode = 1;
-  void prisma.$disconnect();
-});
+  void startWorker().catch((error: unknown) => {
+    console.error(
+      "PostgreSQL conversion worker stopped unexpectedly",
+      error instanceof Error ? error.message : "unknown",
+    );
+    process.exitCode = 1;
+    void prisma.$disconnect();
+  });
+}

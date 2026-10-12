@@ -76,6 +76,7 @@ server/
 │   └── migrations/                   # Committed SQL migration history
 ├── rules/
 │   ├── ELEMENTOR_SKILL.md            # Target platform rules
+│   ├── REACT_NEXT.md                 # React / Next.js source rules
 │   ├── FIGMA.md                      # Figma source rules
 │   └── FRAMER.md                     # Framer source rules
 ├── src/
@@ -86,9 +87,14 @@ server/
 │   ├── config/env.ts                 # Startup environment validation
 │   ├── middleware/errors.ts          # Consistent HTTP error responses
 │   ├── modules/
+│   │   ├── react-nextjs/             # React/Next.js ZIP routes, controller, service, validator, types, tests
+│   │   ├── figma/                    # Native .fig & JSON routes, controller, service, parser, validator, types, tests
+│   │   ├── framer/                   # Framer published-site routes, controller, service, validator, types, tests
+│   │   ├── storage/                  # StorageService abstraction, B2StorageService, LocalStorageService, tests
+│   │   ├── rules/                    # Runtime Markdown rule loader
 │   │   ├── auth/                     # Registration, login, sessions, auth middleware
 │   │   ├── projects/                 # Project CRUD and project-role checks
-│   │   ├── uploads/                  # Upload reservation, streamed content, inspection
+│   │   ├── uploads/                  # Upload reservation, direct/multipart content, inspection
 │   │   ├── conversions/              # Job creation, status, stages, reports, retry, cancel
 │   │   ├── rule-files/               # Rule loading, hashing, and conversion snapshots
 │   │   ├── artifacts/                # Artifact listing and authorized streaming download
@@ -547,10 +553,20 @@ directory or commit its contents.
 | `WEB_ORIGIN` | Required | Allowed browser origin; must be an origin with no path |
 | `DATABASE_URL` | Required | PostgreSQL connection URL |
 | `JWT_SECRET` | Required | HS256 signing secret, minimum 32 characters |
-| `UPLOAD_MAX_BYTES` | `52428800` | Per-file upload limit; configuration maximum is 50 MiB |
-| `UPLOAD_QUOTA_BYTES` | `524288000` | Per-project aggregate upload quota |
-| `STORAGE_PROVIDER` | `local` | Only supported provider; other values are rejected |
-| `LOCAL_STORAGE_PATH` | `./storage/uploads` | Private root; relative paths resolve from the backend package root |
+| `UPLOAD_MAX_BYTES` | `524288000` | Per-file upload limit; maximum is 500 MiB (`524_288_000` bytes) |
+| `UPLOAD_QUOTA_BYTES` | `2147483648` | Per-project aggregate upload quota (default 2 GiB) |
+| `ZIP_MAX_ENTRIES` | `15000` | Maximum entries permitted in an uploaded ZIP archive |
+| `ZIP_MAX_UNCOMPRESSED_BYTES` | `1073741824` | Maximum total uncompressed bytes permitted across a ZIP archive (default 1 GiB) |
+| `ZIP_MAX_ENTRY_BYTES` | `52428800` | Maximum uncompressed bytes for any single inspected file entry |
+| `ZIP_MAX_COMPRESSION_RATIO` | `200` | Maximum allowed uncompressed-to-compressed ratio per entry |
+| `STORAGE_PROVIDER` | `local` (`b2` in production) | Object storage provider (`b2` mandatory in production; `local` for dev/test) |
+| `LOCAL_STORAGE_PATH` | `./storage/uploads` | Private root when `STORAGE_PROVIDER=local` |
+| `B2_BUCKET_NAME` | Required when `STORAGE_PROVIDER=b2` | Private Backblaze B2 bucket name (`design-to-elementor-storage`) |
+| `B2_ENDPOINT` | Required when `STORAGE_PROVIDER=b2` | Backblaze B2 S3-compatible endpoint (`https://s3.us-east-005.backblazeb2.com`) |
+| `B2_REGION` | Derived from `B2_ENDPOINT` or explicit | Backblaze B2 region (`us-east-005`) |
+| `B2_APPLICATION_KEY_ID` | Required when `STORAGE_PROVIDER=b2` | Backblaze B2 Application Key ID |
+| `B2_APPLICATION_KEY` | Required when `STORAGE_PROVIDER=b2` | Backblaze B2 Application Key |
+| `B2_PRESIGNED_TTL_SECONDS` | `900` | Short-lived presigned URL expiration in seconds (60–3600) |
 | `AI_PROVIDER` | `disabled` | Provider identifier; enabled values require key and model |
 | `AI_API_KEY` | Optional | AI provider credential; unused until a provider adapter exists |
 | `AI_MODEL` | Optional | AI model name; unused until a provider adapter exists |
