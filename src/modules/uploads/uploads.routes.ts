@@ -11,7 +11,7 @@ import { HttpError } from "../../middleware/errors.js";
 import { authenticatedUserId } from "../auth/auth.middleware.js";
 import { requireProjectRole } from "../projects/access.js";
 import { inspectReactProjectZip } from "./react-project-inspection.js";
-import { inspectFigmaFileJson } from "./figma-file-inspection.js";
+import { inspectFigmaFileJson, detectNativeFigmaFile } from "./figma-file-inspection.js";
 import { parseNativeFigFile } from "./fig-native.js";
 import { figmaSnapshotStorageKey } from "./figma-import.js";
 
@@ -27,7 +27,7 @@ const initSchema = z.object({
 const extensionTypes: Record<string, string[]> = {
   zip: ["application/zip", "application/x-zip-compressed"],
   json: ["application/json"],
-  fig: ["application/octet-stream", "application/json"],
+  fig: ["application/octet-stream"],
 };
 const uploadableSourceTypes = new Set(["react-next-zip", "figma"]);
 
@@ -154,6 +154,23 @@ uploadsRouter.post("/uploads/:uploadId/complete", async (req, res) => {
           data: { status: UploadStatus.REJECTED, rejection: "Unsupported source type or file extension" },
         });
         throw new HttpError(400, "UNSUPPORTED_SOURCE_FORMAT", "This upload requires a native Figma .fig file or a Figma REST API file JSON export (.json).");
+      }
+
+      const signature = detectNativeFigmaFile(bytes);
+      const reservedType = upload.contentType ?? "";
+      if (reservedType === "application/octet-stream" && signature !== "fig") {
+        await prisma.upload.update({
+          where: { id },
+          data: { status: UploadStatus.REJECTED, rejection: "Uploaded bytes are not a native .fig archive" },
+        });
+        throw new HttpError(415, "FIG_NATIVE_SIGNATURE_MISMATCH", "The uploaded bytes do not have a native .fig file signature (ZIP with canvas.fig or Kiwi binary). Upload an actual native .fig file exported from Figma (File → Save local copy).");
+      }
+      if (reservedType === "application/json" && signature === "fig") {
+        await prisma.upload.update({
+          where: { id },
+          data: { status: UploadStatus.REJECTED, rejection: "Native .fig bytes reserved as JSON" },
+        });
+        throw new HttpError(415, "FIGMA_NATIVE_FILE_UNSUPPORTED", "That looks like a native .fig file reserved with a .json name. Reserve the upload with the .fig filename and the binary content type so it goes through the native Figma parser.");
       }
 
       const isNative = extension === "fig";

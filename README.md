@@ -20,12 +20,15 @@ pipeline. It supports three source types, each with its own real import method:
   public HTML over HTTPS with SSRF protections and explicitly reports its
   limitations. It is not native Framer canvas/project recovery.
 
-Capabilities are reported by `GET /api/v1/capabilities`. The **Elementor
-conversion pipeline is not implemented**: the approved DIR/IR schema and Elementor
-compiler are not present in this repository, so conversion requests return HTTP
-501 `CONVERSION_PIPELINE_UNAVAILABLE` and never create a job. The backend must
-not treat generic HTML/CSS/JavaScript output as a successful Elementor
-conversion.
+Capabilities are reported by `GET /api/v1/capabilities`. Figma and Framer
+conversions are implemented: `POST /api/v1/projects/:projectId/conversions`
+creates a queued job that the worker runs through the Markdown-driven
+pipeline (source analysis rules → canonical DIR → DIR validation →
+`ELEMENTOR_SKILL.md`-based native Elementor generation → structural output
+validation → private artifact persistence). React/Next.js ZIP and screenshot
+conversions still return HTTP 501 `CONVERSION_PIPELINE_UNAVAILABLE` because no
+source-analysis Markdown rules exist for them yet. The backend never treats
+generic HTML/CSS/JavaScript output as a successful Elementor conversion.
 
 Screenshot intake is explicitly unsupported.
 
@@ -518,18 +521,41 @@ Conversion creation accepts `sourceType`, an optional `detectedFramework`
 (React/Next.js), `idempotencyKey`, and a `targetProfile` containing
 `platform: "elementor"`, `architecture`, and `licenseMode`. These target-profile
 values are requests only; they are not a claim that an architecture, widget,
-license, or Elementor version is supported. Conversions currently return HTTP
-501 `CONVERSION_PIPELINE_UNAVAILABLE`; no job is created until the approved
-DIR/compiler exists.
+license, or Elementor version is supported. Figma and Framer conversions create
+a `QUEUED` job with the current Markdown rule snapshots persisted; React/Next.js
+and screenshot conversions return HTTP 501 `CONVERSION_PIPELINE_UNAVAILABLE`
+and create no job. Reusing an idempotency key with the same request replays the
+original job (200, `idempotentReplay: true`); a different request returns
+`409 IDEMPOTENCY_KEY_REUSED`.
 
 Conversion jobs record the selected rule snapshots, exact SHA-256 hashes,
-stages, and diagnostics. They currently stop at `source_ir_validation` with
-`APPROVED_IR_SCHEMA_MISSING`: neither the approved DIR/IR schema nor its
-regression fixtures were present in the inspected workspace. The backend does
-not create an IR schema, compile an Elementor document, or emit a generic
-HTML/CSS/JavaScript fallback. Supply the approved schema before implementing
-IR validation, optimization, target resolution, compiler output, or conversion
-regression tests.
+stages, and diagnostics. The worker runs the Markdown-driven pipeline:
+
+1. loads `FIGMA.md`/`FRAMER.md` and `ELEMENTOR_SKILL.md` at conversion time
+   (cache invalidated on file edit via mtime + content hash, so rule edits
+   affect subsequent conversions without code changes),
+2. asks the AI to interpret the parsed source snapshot into the canonical DIR,
+3. validates the DIR against `dir-schema.ts` (the documented envelope and node
+   kinds from FIGMA.md §2); an invalid DIR blocks the job at
+   `source_ir_validation` and never reaches the generator,
+4. asks the AI to generate native Elementor JSON from the validated DIR using
+   the current `ELEMENTOR_SKILL.md` as trusted system instructions with the
+   DIR framed as untrusted data,
+5. validates the generated Elementor output structurally with
+   `elementor-output-schema.ts` (root `content` array, per-element `id`,
+   `elType`, `settings`, nested `elements`, unique ids, actionable
+   path diagnostics),
+6. only after validation succeeds, writes the output to private local storage
+   and creates the `Artifact` record (actual size and SHA-256), then marks the
+   conversion `SUCCEEDED` with the `target_ir_generation` stage recording the
+   output key.
+
+The AI provider is read at call time from `AI_PROVIDER`/`AI_API_KEY`/
+`AI_MODEL`; when disabled the job fails with `AI_PROVIDER_DISABLED` instead of
+producing fabricated output, and provider, JSON-extraction, or structural
+failures fail the job truthfully. Storage or artifact-persistence failures mark
+the job `FAILED` and leave no dangling artifact record. The backend never emits
+a generic HTML/CSS/JavaScript fallback in place of native Elementor JSON.
 
 The WordPress API stores credentials encrypted at rest and verifies sites
 through the custom bridge capability endpoint

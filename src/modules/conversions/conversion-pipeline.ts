@@ -1,13 +1,20 @@
 import { HttpError } from "../../middleware/errors.js";
+import { Readable } from "node:stream";
+import { prisma } from "../../infrastructure/database/prisma.js";
 import { storage } from "../../infrastructure/storage/local.js";
 import {
   ConversionRules,
   ConversionSourceType,
   loadConversionRules,
 } from "../rules/rule-loader.js";
-import { requestConversionCompletion } from "../../infrastructure/ai/provider.js";
+import {
+  requestConversionCompletion,
+  AiCompletionRequest,
+} from "../../infrastructure/ai/provider.js";
 import { validateDir, DirValidationResult } from "./dir-schema.js";
 import { parseNativeFigFile, FigNativeDocument } from "../uploads/fig-native.js";
+import { generateElementorOutput, ElementorGenerationContext } from "./elementor-generator.js";
+import { EmitterDocument } from "./elementor-output-schema.js";
 
 // Conversion pipeline. Each stage is separated and truthful:
 //
@@ -15,16 +22,23 @@ import { parseNativeFigFile, FigNativeDocument } from "../uploads/fig-native.js"
 //   2. obtain the parsed source design,
 //   3. ask the AI to produce the canonical DIR,
 //   4. validate that DIR against the documented specification,
-//   5. generate native Elementor output.
+//   5. generate native Elementor output from the validated DIR.
 //
-// Stage 5 is deliberately BLOCKED: this repository ships no Elementor generator,
-// and inventing one (or emitting HTML/CSS that only looks like Elementor) would
-// fabricate output. The pipeline returns a clear, actionable diagnostic instead.
+// Stage 5 is the real AI-driven DIR-to-Elementor transformation. It uses the
+// current ELEMENTOR_SKILL.md rule file as trusted system instructions and the
+// validated canonical DIR as the only design input. The result must be genuine
+// native Elementor JSON; HTML/CSS or the DIR itself are never acceptable output.
 
 export type ConversionSource = {
   sourceType: ConversionSourceType;
   snapshotKey: string;
 };
+
+export interface ConversionContext {
+  projectId: string;
+  conversionId: string;
+  sourceType: ConversionSourceType;
+}
 
 export type ConversionPipelineResult =
   | {
@@ -37,6 +51,7 @@ export type ConversionPipelineResult =
       status: "SUCCEEDED";
       dir: unknown;
       dirValidation: DirValidationResult;
+      elementorOutput: EmitterDocument;
       ruleVersions: Array<{ fileName: string; sha256: string }>;
     };
 
@@ -45,6 +60,14 @@ const DIR_TASK = [
   "rules above, then output the canonical DIR JSON for the target described in",
   "the target rules above. Return ONE DIR JSON object and nothing else: no",
   "markdown fences, no comments, no explanations.",
+].join(" ");
+
+const ELEMENTOR_TASK = [
+  "You are converting a validated canonical DIR into native Elementor output.",
+  "Using the Elementor output rules provided in the system instructions, produce",
+  "a single native Elementor JSON document and return nothing else.",
+  "Return ONLY the Elementor JSON object: no markdown fences, no comments, no",
+  "explanation.",
 ].join(" ");
 
 function extractJson(text: string): unknown {
@@ -61,13 +84,21 @@ function extractJson(text: string): unknown {
 
 /**
  * Run the Markdown-driven conversion pipeline for a stored source snapshot.
- * Throws only for unexpected infrastructure errors; expected pipeline outcomes
- * (missing rules, disabled AI, invalid DIR, missing Elementor generator) are
- * returned as truthful BLOCKED results or actionable HttpErrors.
+ *
+ * Pipeline:
+ *   1. Load the current Markdown rules (fresh at conversion time).
+ *   2. Obtain the parsed source design from private storage.
+ *   3. Ask the AI to produce the canonical DIR.
+ *   4. Validate the DIR against the documented specification.
+ *   5. Generate native Elementor output using ELEMENTOR_SKILL.md.
+ *
+ * Returns BLOCKED when any stage fails with diagnostics, or SUCCEEDED with the
+ * validated canonical DIR and the actual generated Elementor output.
  */
 export async function runConversionPipeline(
   source: ConversionSource,
   snapshotKey: string,
+  context: ConversionContext,
 ): Promise<ConversionPipelineResult> {
   // Stage 1: load the current Markdown rules (fresh at conversion time).
   const rules: ConversionRules = loadConversionRules(source.sourceType);
@@ -83,17 +114,15 @@ export async function runConversionPipeline(
   }
   const designPayload = JSON.stringify(snapshot);
 
-  // Stage 3: ask the AI to produce the DIR using the loaded rules.
-  // requestConversionCompletion throws an actionable HttpError when AI is
-  // disabled/unconfigured, so we never fabricate a DIR here.
-  const completion = await requestConversionCompletion({
+  // Stage 3: ask the AI to produce the canonical DIR using the source rules.
+  const dirCompletion = await requestCompletion({
     rules,
     designPayload,
     task: DIR_TASK,
   });
 
   // Stage 4: validate the generated DIR against the documented specification.
-  const dir = extractJson(completion.text);
+  const dir = extractJson(dirCompletion.text);
   const dirValidation = validateDir(dir);
   if (!dirValidation.valid) {
     return {
@@ -108,26 +137,78 @@ export async function runConversionPipeline(
     };
   }
 
-  // Stage 5: native Elementor generation. No generator exists in this
-  // repository, so report it as an explicit, actionable blocker rather than
-  // emitting fabricated Elementor output. This is the honest terminal state.
-  return {
-    status: "BLOCKED",
-    stage: "target_ir_generation",
-    ruleVersions,
-    diagnostics: [
-      {
-        code: "ELEMENTOR_GENERATOR_MISSING",
-        stage: "target_ir_generation",
-        message: [
-          "The canonical DIR was produced and validated, but no native Elementor",
-          "generator is implemented in this repository. The approved Elementor",
-          "output generator must be supplied before a conversion can complete;",
-          "HTML/CSS is not an acceptable substitute for native Elementor output.",
-        ].join(" "),
-      },
-    ],
+  // Stage 5: generate native Elementor output using the current ELEMENTOR_SKILL.md.
+  const elementorContext: ConversionContext = {
+    projectId: context.projectId,
+    conversionId: context.conversionId,
+    sourceType: source.sourceType,
   };
+  const elementorResult = await generateElementorOutput(dir, elementorContext);
+
+  return {
+    status: "SUCCEEDED",
+    dir,
+    dirValidation,
+    elementorOutput: elementorResult.output,
+    ruleVersions: elementorResult.ruleVersions,
+  };
+}
+
+/** Ask the AI provider for the requested completion using the loaded Markdown rules. */
+async function requestCompletion(
+  request: AiCompletionRequest,
+): Promise<{ text: string; ruleVersions: Array<{ fileName: string; sha256: string }> }> {
+  const completion = await requestConversionCompletion(request);
+  return {
+    text: completion.text,
+    ruleVersions: completion.ruleVersions,
+  };
+}
+
+export type ElementorArtifactResult = {
+  storageKey: string;
+  fileName: string;
+  contentType: string;
+  sizeBytes: number;
+  sha256: string;
+};
+
+/**
+ * Persist the validated native Elementor output to private local storage and
+ * record the matching Artifact row. The write is atomic: the Artifact record is
+ * only created after the bytes are durably stored, and both operations run
+ * against the correct project/conversion. Failures throw so the caller can mark
+ * the conversion FAILED — never a false success.
+ */
+export async function persistElementorArtifact(
+  projectId: string,
+  conversionId: string,
+  elementorOutput: EmitterDocument,
+): Promise<ElementorArtifactResult> {
+  const fileName = "elementor.json";
+  const contentType = "application/json";
+  const storageKey = `conversions/${projectId}/${conversionId}/elementor.json`;
+  const outputBytes = Buffer.from(JSON.stringify(elementorOutput), "utf8");
+  const { sizeBytes, sha256 } = await storage.write(storageKey, Readable.from([outputBytes]), outputBytes.length);
+  try {
+    await prisma.artifact.create({
+      data: {
+        projectId,
+        conversionId,
+        storageKey,
+        fileName,
+        contentType,
+        sizeBytes: BigInt(sizeBytes),
+        sha256,
+        status: "READY",
+      },
+    });
+  } catch (error) {
+    // Never leave a dangling artifact file when its DB record failed.
+    await storage.delete(storageKey).catch(() => undefined);
+    throw error;
+  }
+  return { storageKey, fileName, contentType, sizeBytes, sha256 };
 }
 
 /** Parse a native `.fig` upload into a document (used before pipeline runs). */

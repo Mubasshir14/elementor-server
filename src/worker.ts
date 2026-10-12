@@ -9,7 +9,7 @@ import {
   recordConversionFailure,
   recoverStaleConversions,
 } from "./infrastructure/queue/postgres-jobs.js";
-import { runConversionPipeline } from "./modules/conversions/conversion-pipeline.js";
+import { runConversionPipeline, persistElementorArtifact } from "./modules/conversions/conversion-pipeline.js";
 
 const POLL_INTERVAL_MS = 1_000;
 const RECOVERY_INTERVAL_MS = 15_000;
@@ -95,8 +95,7 @@ async function processConversion(conversionId: string, workerId: string): Promis
     // Run the Markdown-driven conversion pipeline for Figma/Framer sources.
     // React/Next.js keeps the original blocked behavior (no source-analysis rule
     // file exists for it yet). The pipeline loads rules at conversion time, asks
-    // the AI for a DIR, validates it, then reports the missing Elementor
-    // generator as an explicit blocker — never a fabricated success.
+    // the AI for a DIR, validates it, then generates native Elementor output.
     let pipelineResult: Awaited<ReturnType<typeof runConversionPipeline>> | null = null;
     if (conversion.upload.sourceImportId) {
       const sourceImport = await prisma.sourceImport.findUnique({
@@ -111,6 +110,11 @@ async function processConversion(conversionId: string, workerId: string): Promis
               snapshotKey: sourceImport.snapshotKey,
             },
             sourceImport.snapshotKey,
+            {
+              projectId: conversion.projectId,
+              conversionId: conversion.id,
+              sourceType: sourceImport.kind === "FIGMA_FILE" ? "figma" : "framer",
+            },
           );
         } catch (error) {
           // Actionable pipeline error (disabled AI, missing key, unreachable
@@ -147,44 +151,103 @@ async function processConversion(conversionId: string, workerId: string): Promis
           stage: pipelineResult.stage,
         }
       : {
-          code: "APPROVED_IR_SCHEMA_MISSING",
+          code: "SOURCE_ANALYSIS_RULES_MISSING",
           severity: "error",
-          message: "Conversion stopped because the approved DIR/IR schema is not available to the backend.",
+          message: "Conversion stopped because this job has no validated Figma or Framer source import; the Markdown-driven pipeline requires source-analysis rules for the recorded source type.",
           stage: "source_ir_validation",
         };
+
+    const success = pipelineResult?.status === "SUCCEEDED";
+
+    // Persistence-first ordering: a conversion may only be marked SUCCEEDED
+    // after the validated Elementor output is durably stored and the Artifact
+    // record exists. Any storage/DB failure marks the job FAILED instead.
+    let persisted: Awaited<ReturnType<typeof persistElementorArtifact>> | null = null;
+    if (success && pipelineResult && pipelineResult.status === "SUCCEEDED") {
+      try {
+        persisted = await persistElementorArtifact(
+          conversion.projectId,
+          conversion.id,
+          pipelineResult.elementorOutput,
+        );
+      } catch (error) {
+        const code = (error as { code?: string }).code ?? "ARTIFACT_PERSISTENCE_FAILED";
+        const message = error instanceof Error ? error.message : "Artifact persistence failed";
+        await prisma.$transaction(async (tx) => {
+          const owned = await tx.conversionJob.updateMany({
+            where: { id: conversionId, status: "RUNNING", workerId },
+            data: { status: "FAILED", errorCode: code, errorMessage: message, workerId: null, lockedAt: null },
+          });
+          if (owned.count === 0) return;
+          await tx.conversionStage.updateMany({
+            where: { conversionId, status: { in: [StageStatus.PENDING, StageStatus.RUNNING] } },
+            data: { status: StageStatus.FAILED, completedAt: new Date() },
+          });
+          await tx.validationReport.upsert({
+            where: { conversionId },
+            create: { conversionId, diagnostics: [{ code, severity: "error", message, stage: "artifact_persistence" }] },
+            update: { diagnostics: [{ code, severity: "error", message, stage: "artifact_persistence" }] },
+          });
+        });
+        return;
+      }
+    }
+
+    const completedAt = success ? new Date() : null;
+    const jobStatus = success ? "SUCCEEDED" : "BLOCKED";
+    const jobErrorCode = success ? null : diagnostic.code;
+    const jobErrorMessage = success ? null : diagnostic.message;
+    const jobWorkerId = success ? null : workerId;
+    const jobLockedAt = success ? null : new Date();
+
     await prisma.$transaction(async (tx) => {
       const owned = await tx.conversionJob.updateMany({
         where: { id: conversionId, status: "RUNNING", workerId },
         data: {
-          status: "BLOCKED",
-          errorCode: diagnostic.code,
-          errorMessage: diagnostic.message,
-          workerId: null,
-          lockedAt: null,
+          status: jobStatus,
+          errorCode: jobErrorCode,
+          errorMessage: jobErrorMessage,
+          workerId: jobWorkerId,
+          lockedAt: jobLockedAt,
         },
       });
       if (owned.count === 0) return;
       await tx.conversionStage.update({
         where: { conversionId_name: { conversionId, name: "source_ir_validation" } },
         data: {
-          status: StageStatus.BLOCKED,
+          status: success ? StageStatus.COMPLETED : StageStatus.BLOCKED,
           inputHash: uploadSha256,
           diagnostics: pipelineDiagnostics ?? [diagnostic],
-          completedAt: new Date(),
+          completedAt,
         },
       });
       await tx.conversionStage.updateMany({
         where: { conversionId, status: StageStatus.PENDING },
         data: {
-          status: StageStatus.BLOCKED,
-          diagnostics: [{ code: "UPSTREAM_STAGE_BLOCKED", stage: "source_ir_validation" }],
-          completedAt: new Date(),
+          status: success ? StageStatus.COMPLETED : StageStatus.BLOCKED,
+          diagnostics: success ? [{ code: "UPSTREAM_STAGE_COMPLETED" }] : [{ code: "UPSTREAM_STAGE_BLOCKED", stage: "source_ir_validation" }],
+          completedAt,
         },
       });
+      if (success && persisted) {
+        await tx.conversionStage.update({
+          where: { conversionId_name: { conversionId, name: "target_ir_generation" } },
+          data: {
+            status: StageStatus.COMPLETED,
+            outputKey: persisted.storageKey,
+            completedAt,
+          },
+        });
+      }
       await tx.validationReport.upsert({
         where: { conversionId },
-        create: { conversionId, diagnostics: pipelineDiagnostics ?? [diagnostic] },
-        update: { diagnostics: pipelineDiagnostics ?? [diagnostic] },
+        create: {
+          conversionId,
+          diagnostics: pipelineDiagnostics ?? [diagnostic],
+        },
+        update: {
+          diagnostics: pipelineDiagnostics ?? [diagnostic],
+        },
       });
     });
   } finally {
@@ -221,11 +284,11 @@ async function workerLoop(workerId: string): Promise<void> {
         }
         console.error(
           `Conversion ${conversionId} failed`,
-          error instanceof Error ? error.name : "unknown",
+          error instanceof Error ? error.message : "unknown",
         );
       }
     } catch (error) {
-      console.error("PostgreSQL conversion worker loop failed", error instanceof Error ? error.name : "unknown");
+      console.error("PostgreSQL conversion worker loop failed", error instanceof Error ? error.message : "unknown");
       await delay(POLL_INTERVAL_MS);
     }
   }
@@ -251,7 +314,7 @@ process.once("SIGTERM", () => {
 void startWorker().catch((error: unknown) => {
   console.error(
     "PostgreSQL conversion worker stopped unexpectedly",
-    error instanceof Error ? error.name : "unknown",
+    error instanceof Error ? error.message : "unknown",
   );
   process.exitCode = 1;
   void prisma.$disconnect();

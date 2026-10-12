@@ -128,6 +128,22 @@ describe("Figma direct file upload", () => {
     expect(zipForFigma.status).toBe(400);
     expect(zipForFigma.body.error.code).toBe("FILE_TYPE_MISMATCH");
 
+    // `.fig` must not be reserved as JSON: native uploads use the binary MIME type.
+    const figAsJson = await request(app)
+      .post(`/api/v1/projects/${PROJECT_ID}/uploads`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ sourceType: "figma", fileName: "design.fig", contentType: "application/json", sizeBytes: 10 });
+    expect(figAsJson.status).toBe(400);
+    expect(figAsJson.body.error.code).toBe("FILE_TYPE_MISMATCH");
+
+    // `.json` must not be reserved as octet-stream: JSON uploads keep application/json.
+    const jsonAsBinary = await request(app)
+      .post(`/api/v1/projects/${PROJECT_ID}/uploads`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ sourceType: "figma", fileName: "design.json", contentType: "application/octet-stream", sizeBytes: 10 });
+    expect(jsonAsBinary.status).toBe(400);
+    expect(jsonAsBinary.body.error.code).toBe("FILE_TYPE_MISMATCH");
+
     // A native `.fig` reservation with the binary content type succeeds.
     vi.mocked(prisma.$transaction).mockImplementation(async (fn: any) => await fn({
       $queryRaw: vi.fn(),
@@ -189,6 +205,7 @@ describe("Figma direct file upload", () => {
     await storage.write(STORAGE_KEY, Readable.from([figBytes]), figBytes.length);
     vi.mocked(prisma.upload.findUnique).mockResolvedValue({
       ...seedFigmaUpload("design.fig"),
+      contentType: "application/octet-stream",
       sizeBytes: BigInt(figBytes.length),
     } as never);
     vi.mocked(prisma.projectMember.findUnique).mockResolvedValue({ role: "OWNER" } as never);
@@ -245,6 +262,60 @@ describe("Figma direct file upload", () => {
 
     expect(response.status).toBe(415);
     expect(response.body.error.code).toBe("FIGMA_NATIVE_FILE_UNSUPPORTED");
+    expect(prisma.sourceImport.create).not.toHaveBeenCalled();
+    expect(prisma.upload.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ status: "REJECTED" }),
+    }));
+
+    await storage.delete(STORAGE_KEY);
+  });
+
+  it("rejects JSON bytes reserved as .fig because the signature does not match the binary MIME type", async () => {
+    authenticate();
+    const bytes = Buffer.from(JSON.stringify(figmaFileJson), "utf8");
+    await storage.write(STORAGE_KEY, Readable.from([bytes]), bytes.length);
+    vi.mocked(prisma.upload.findUnique).mockResolvedValue({
+      ...seedFigmaUpload("design.fig"),
+      contentType: "application/octet-stream",
+      sizeBytes: BigInt(bytes.length),
+    } as never);
+    vi.mocked(prisma.projectMember.findUnique).mockResolvedValue({ role: "OWNER" } as never);
+    vi.mocked(prisma.upload.update).mockImplementation(async (args: never) => args as never);
+
+    const response = await request(app)
+      .post(`/api/v1/uploads/${UPLOAD_ID}/complete`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({});
+
+    expect(response.status).toBe(415);
+    expect(response.body.error.code).toBe("FIG_NATIVE_SIGNATURE_MISMATCH");
+    expect(prisma.sourceImport.create).not.toHaveBeenCalled();
+
+    await storage.delete(STORAGE_KEY);
+  });
+
+  it("rejects corrupt .fig bytes with a valid signature instead of reporting a successful parse", async () => {
+    authenticate();
+    const corrupt = Buffer.concat([
+      Buffer.from([0x50, 0x4b, 0x03, 0x04]),
+      Buffer.from("canvas.fig", "latin1"),
+      Buffer.from([0x01, 0x02, 0x03, 0x04, 0x05]),
+    ]);
+    await storage.write(STORAGE_KEY, Readable.from([corrupt]), corrupt.length);
+    vi.mocked(prisma.upload.findUnique).mockResolvedValue({
+      ...seedFigmaUpload("broken.fig"),
+      contentType: "application/octet-stream",
+      sizeBytes: BigInt(corrupt.length),
+    } as never);
+    vi.mocked(prisma.projectMember.findUnique).mockResolvedValue({ role: "OWNER" } as never);
+    vi.mocked(prisma.upload.update).mockImplementation(async (args: any) => args.data as never);
+
+    const response = await request(app)
+      .post(`/api/v1/uploads/${UPLOAD_ID}/complete`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({});
+
+    expect(response.status).not.toBe(200);
     expect(prisma.sourceImport.create).not.toHaveBeenCalled();
     expect(prisma.upload.update).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ status: "REJECTED" }),

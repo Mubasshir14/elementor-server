@@ -18,12 +18,20 @@ Figma REST API file JSON exports (`.json`) can currently be uploaded and parsed
 locally; Framer accepts a published-site URL for analysis, and screenshots are
 reported as unavailable because their import adapters are not present.
 
-The conversion pipeline is **not yet a complete design converter**. The worker
-currently inspects that an upload is ready, marks `source_inspection`
-complete, and blocks at `source_ir_validation` with
-`APPROVED_IR_SCHEMA_MISSING`. The approved DIR/IR schema and regression
-fixtures are not present in this workspace. No Elementor document is compiled
-and no HTML/CSS/JavaScript fallback is generated.
+The conversion pipeline is implemented for Figma and Framer sources. When a
+conversion job is created it records three stages — `source_inspection`,
+`source_ir_validation`, and `target_ir_generation` — plus the current Markdown
+rule snapshots (FIGMA.md/FRAMER.md + ELEMENTOR_SKILL.md) with exact SHA-256
+hashes. The worker runs the Markdown-driven pipeline: source analysis rules →
+canonical DIR → DIR validation → ELEMENTOR_SKILL.md-based native Elementor
+generation → structural output validation → private artifact persistence. A job
+is marked `SUCCEEDED` only after the generated native Elementor output is
+validated and stored as a private Artifact; invalid DIR, disabled/failing AI,
+malformed model output, or storage/persistence failures produce truthful
+`BLOCKED`/`FAILED` states instead of fabricated output. React/Next.js ZIP and
+screenshot conversions return `501 CONVERSION_PIPELINE_UNAVAILABLE` because no
+source-analysis Markdown rules exist for them. No HTML/CSS/JavaScript fallback
+is ever generated in place of native Elementor JSON.
 
 WordPress publishing is also deliberately disabled. The API can store an
 encrypted credential and verify a site's bridge capabilities, but native
@@ -143,17 +151,24 @@ PostgreSQL pending jobs ──► Worker ──► PostgreSQL job/stage/report s
    verifies a framework dependency and matching application source paths,
    calculates SHA-256, and stores the detected framework. It never executes
    uploaded code. Valid uploads become `READY`.
-6. A conversion request is validated against the ready upload and retains
-   `sourceType`, detected framework, and the requested Elementor profile. The
-   endpoint returns HTTP 501 with `CONVERSION_PIPELINE_UNAVAILABLE`; it does
-   not create a job because the approved DIR schema and compiler are absent.
-7. For previously persisted jobs, the worker validates the queue payload, claims the job, records
-   `source_inspection`, then blocks it at `source_ir_validation` because the
-   approved IR schema is missing. It writes a validation report and upstream
-   blocked-stage diagnostics.
-8. The client polls conversion, stage, and report endpoints. Ready artifacts
-   are streamed from an authorized endpoint, but the current worker does not
-   generate any.
+6. A conversion request is validated against the ready source (upload for
+   React/Next.js, source import for Figma/Framer) and retains `sourceType`,
+   detected framework, and the requested Elementor profile. Figma and Framer
+   requests create a `QUEUED` job with the current Markdown rule snapshots
+   persisted as rule versions; React/Next.js and screenshot requests return
+   HTTP 501 `CONVERSION_PIPELINE_UNAVAILABLE` and create no job.
+7. For claimed jobs, the worker records `source_inspection`, then runs the
+   Markdown-driven pipeline: it loads the current `FIGMA.md`/`FRAMER.md` and
+   `ELEMENTOR_SKILL.md` (mtime + hash cache invalidation), asks the AI to
+   produce the canonical DIR, validates it against the documented schema, asks
+   the AI to generate native Elementor JSON from the validated DIR under the
+   trusted `ELEMENTOR_SKILL.md` instructions, structurally validates that
+   output, and — only then — stores it privately and creates the `Artifact`
+   record before marking the conversion `SUCCEEDED`. Any failure is recorded as
+   a truthful `FAILED`/`BLOCKED` state with diagnostics.
+8. The client polls conversion, stage, and report endpoints. Generated Elementor
+   artifacts are streamed from the authorized artifact endpoint after the job
+   succeeds.
 9. Site capability verification is a separate operation. Publishing is
    rejected with HTTP 501 until a verified native publishing adapter exists.
 
@@ -162,16 +177,12 @@ PostgreSQL pending jobs ──► Worker ──► PostgreSQL job/stage/report s
 | Position | Stage name | Current behavior |
 |---:|---|---|
 | 0 | `source_inspection` | Worker marks complete after confirming the upload is ready |
-| 1 | `source_ir_validation` | Worker marks blocked with `APPROVED_IR_SCHEMA_MISSING` |
-| 2 | `optimization` | Created but blocked as an upstream stage |
-| 3 | `target_resolution` | Created but blocked as an upstream stage |
-| 4 | `compilation` | Created but blocked as an upstream stage |
-| 5 | `output_validation` | Created but blocked as an upstream stage |
-| 6 | `artifact_storage` | Created but blocked as an upstream stage |
+| 1 | `source_ir_validation` | Worker marks complete when the AI-produced DIR passes validation against the documented schema; blocks with DIR diagnostics otherwise |
+| 2 | `target_ir_generation` | Worker marks complete after the AI-generated native Elementor output is structurally validated and persisted privately, recording the output key; fails with AI/JSON/schema/storage diagnostics otherwise |
 
-The README's full proposed pipeline (source analysis, Source IR, deterministic
-compiler, and output validation) describes intended future behavior, not
-current worker functionality.
+The pipeline stages recorded in the database are `source_inspection`,
+`source_ir_validation`, and `target_ir_generation`; their current behavior is
+described in the table above and matches the worker implementation.
 
 ## 5. HTTP API
 
@@ -235,7 +246,7 @@ extract and execute uploaded project files.
 
 | Method and path | Request | Success / notes |
 |---|---|---|
-| `POST /projects/:projectId/conversions` | `{ "sourceType": "react-next-zip" \| "figma" \| "framer" \| "screenshot", "detectedFramework": "react" \| "nextjs" (React/Next.js ZIP only), "uploadId": "<uuid>", "idempotencyKey": "unique-key-8-to-128-chars", "targetProfile": { "platform": "elementor", "architecture": "atomic" \| "legacy" \| "hybrid", "licenseMode": "free" \| "pro" \| "hybrid" } }` | `501 CONVERSION_PIPELINE_UNAVAILABLE`; validated settings are not discarded, and no job is created until the DIR/compiler exists |
+| `POST /projects/:projectId/conversions` | `{ "sourceType": "react-next-zip" \| "figma" \| "framer" \| "screenshot", "detectedFramework": "react" \| "nextjs" (React/Next.js ZIP only), "uploadId": "<uuid>", "idempotencyKey": "unique-key-8-to-128-chars", "targetProfile": { "platform": "elementor", "architecture": "atomic" \| "legacy" \| "hybrid", "licenseMode": "free" \| "pro" \| "hybrid" } }` | `201`, `{ conversion: { id, status: "QUEUED" }, idempotentReplay: false }` for Figma/Framer (rule snapshots persisted; same key + same payload replays `200`); `501 CONVERSION_PIPELINE_UNAVAILABLE` for React/Next.js/screenshot, where no job is created |
 | `GET /conversions/:conversionId` | None | `200`, `{ conversion }` including status, attempt, target profile, rules and error details |
 | `GET /conversions/:conversionId/stages` | None | `200`, `{ stages: [...] }` ordered by position |
 | `GET /conversions/:conversionId/reports` | None | `200`, `{ report: null \| { diagnostics, createdAt } }` |
@@ -243,12 +254,15 @@ extract and execute uploaded project files.
 | `POST /conversions/:conversionId/cancel` | Empty object `{}` | `202`, `{ conversionId, cancellationRequested: true }`; finished jobs cannot be cancelled |
 | `GET /conversions/:conversionId/artifacts` | None | `200`, `{ artifacts: [...] }`; only ready artifacts are listed |
 
-`idempotencyKey` is scoped to a project. Reusing a key with a different request
-returns `409 IDEMPOTENCY_KEY_REUSED`. The target-profile fields represent
-requested options only; accepting a request does not certify that a specific
-Elementor architecture, widget, version, or license is supported. Current
-worker behavior blocks every conversion at IR validation until the approved
-schema becomes available.
+`idempotencyKey` is scoped to a project. Reusing a key with the same request
+replays the original job (200); a different request returns
+`409 IDEMPOTENCY_KEY_REUSED`. The target-profile fields represent requested
+options only; accepting a request does not certify that a specific Elementor
+architecture, widget, version, or license is supported. Figma and Framer
+conversions run through the Markdown-driven pipeline and complete only after
+the generated native Elementor output is structurally validated and persisted
+as a private Artifact; React/Next.js and screenshot conversions remain blocked
+at creation with `501 CONVERSION_PIPELINE_UNAVAILABLE`.
 
 ### Rules, WordPress sites, and artifacts
 

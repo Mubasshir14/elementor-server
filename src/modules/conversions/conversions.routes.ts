@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Prisma, ProjectRole, StageStatus, UploadStatus } from "../../generated/prisma/client.js";
 import { Router } from "express";
 import { z } from "zod";
@@ -6,6 +7,7 @@ import { HttpError } from "../../middleware/errors.js";
 import { authenticatedUserId } from "../auth/auth.middleware.js";
 import { requireProjectRole } from "../projects/access.js";
 import { conversionSettingsBaseSchema } from "../capabilities/capabilities.schema.js";
+import { loadRulesForConversion, persistConversionRules } from "../rule-files/rules.service.js";
 
 export const conversionsRouter = Router();
 
@@ -44,51 +46,101 @@ conversionsRouter.post("/projects/:projectId/conversions", async (req, res) => {
   const projectId = z.string().cuid().parse(req.params.projectId);
   const userId = authenticatedUserId(req);
   await requireProjectRole(projectId, userId, [ProjectRole.OWNER, ProjectRole.EDITOR]);
-  if (body.sourceType === "react-next-zip") {
-    if (!body.uploadId) {
-      throw new HttpError(400, "UPLOAD_NOT_READY", "Conversion requires a ready upload in this project");
-    }
-    const upload = await prisma.upload.findFirst({
-      where: { id: body.uploadId, projectId, status: UploadStatus.READY },
-      select: { id: true, sourceType: true, detectedFramework: true },
-    });
-    if (!upload) throw new HttpError(400, "UPLOAD_NOT_READY", "Conversion requires a ready upload in this project");
-    if (
-      upload.sourceType.toLowerCase().replaceAll("_", "-") !== body.sourceType ||
-      body.detectedFramework !== upload.detectedFramework
-    ) {
-      throw new HttpError(400, "UPLOAD_SOURCE_MISMATCH", "Conversion source settings must match the validated upload.");
-    }
-  } else {
-    if (!body.sourceImportId) {
-      throw new HttpError(400, "SOURCE_IMPORT_REQUIRED", "Figma and Framer conversions require a validated source import reference");
-    }
-    const sourceImport = await prisma.sourceImport.findFirst({
-      where: { id: body.sourceImportId, projectId, status: "READY" },
-      select: { id: true, kind: true },
-    });
-    if (!sourceImport) {
-      throw new HttpError(400, "SOURCE_IMPORT_NOT_READY", "Conversion requires a ready Figma or Framer import in this project");
-    }
-    const expectedKind = body.sourceType === "figma" ? "FIGMA_FILE" : "FRAMER_SITE";
-    if (sourceImport.kind !== expectedKind) {
-      throw new HttpError(400, "SOURCE_IMPORT_MISMATCH", "Conversion source settings must match the validated import.");
-    }
-    if (body.uploadId) {
-      const upload = await prisma.upload.findFirst({
-        where: { id: body.uploadId, projectId, sourceImportId: sourceImport.id, status: UploadStatus.READY },
-        select: { id: true },
-      });
-      if (!upload) {
-        throw new HttpError(400, "UPLOAD_SOURCE_MISMATCH", "The upload reference must belong to the validated source import.");
-      }
-    }
+  if (body.sourceType === "react-next-zip" || body.sourceType === "screenshot") {
+    throw new HttpError(
+      501,
+      "CONVERSION_PIPELINE_UNAVAILABLE",
+      "This source type has no approved Markdown conversion rules yet. No conversion job was created.",
+    );
   }
-  throw new HttpError(
-    501,
-    "CONVERSION_PIPELINE_UNAVAILABLE",
-    "The approved DIR schema and Elementor compiler are not available. No conversion job was created.",
-  );
+
+  if (!body.sourceImportId) {
+    throw new HttpError(400, "SOURCE_IMPORT_REQUIRED", "Figma and Framer conversions require a validated source import reference");
+  }
+  const sourceImport = await prisma.sourceImport.findFirst({
+    where: { id: body.sourceImportId, projectId, status: "READY" },
+    select: { id: true, kind: true },
+  });
+  if (!sourceImport) {
+    throw new HttpError(400, "SOURCE_IMPORT_NOT_READY", "Conversion requires a ready Figma or Framer import in this project");
+  }
+  const expectedKind = body.sourceType === "figma" ? "FIGMA_FILE" : "FRAMER_SITE";
+  if (sourceImport.kind !== expectedKind) {
+    throw new HttpError(400, "SOURCE_IMPORT_MISMATCH", "Conversion source settings must match the validated import.");
+  }
+  let resolvedUploadId: string | null = null;
+  if (body.uploadId) {
+    const upload = await prisma.upload.findFirst({
+      where: { id: body.uploadId, projectId, sourceImportId: sourceImport.id, status: UploadStatus.READY },
+      select: { id: true },
+    });
+    if (!upload) {
+      throw new HttpError(400, "UPLOAD_SOURCE_MISMATCH", "The upload reference must belong to the validated source import.");
+    }
+    resolvedUploadId = upload.id;
+  }
+
+  const sourcePlatform = body.sourceType === "figma" ? "FIGMA" : "FRAMER";
+  const requestHash = createHash("sha256")
+    .update(
+      JSON.stringify({
+        sourceType: body.sourceType,
+        detectedFramework: body.detectedFramework ?? null,
+        sourceImportId: body.sourceImportId ?? null,
+        uploadId: resolvedUploadId,
+        targetProfile: body.targetProfile,
+      }),
+    )
+    .digest("hex");
+  const rules = await loadRulesForConversion(body.sourceType);
+
+  const existing = await prisma.conversionJob.findUnique({
+    where: { projectId_idempotencyKey: { projectId, idempotencyKey: body.idempotencyKey } },
+    select: { id: true, status: true, requestHash: true },
+  });
+  if (existing) {
+    // Same key + same request replays idempotently; same key + different
+    // payload is a client contract violation (documented 409).
+    if (existing.requestHash !== requestHash) {
+      throw new HttpError(
+        409,
+        "IDEMPOTENCY_KEY_REUSED",
+        "This idempotency key was already used with a different conversion request.",
+      );
+    }
+    return res.status(200).json({ conversion: { id: existing.id, status: existing.status }, idempotentReplay: true });
+  }
+
+  const conversion = await prisma.$transaction(async (tx) => {
+    const created = await tx.conversionJob.create({
+      data: {
+        projectId,
+        createdById: userId,
+        uploadId: resolvedUploadId,
+        sourcePlatform,
+        idempotencyKey: body.idempotencyKey,
+        requestHash,
+        status: "QUEUED",
+        targetProfile: body.targetProfile as Prisma.InputJsonValue,
+      },
+      select: { id: true, status: true },
+    });
+    await persistConversionRules(tx, created.id, rules);
+    await tx.conversionStage.createMany({
+      data: [
+        { conversionId: created.id, name: "source_inspection", position: 0 },
+        { conversionId: created.id, name: "source_ir_validation", position: 1 },
+        { conversionId: created.id, name: "target_ir_generation", position: 2 },
+      ],
+    });
+    await tx.conversionStage.update({
+      where: { conversionId_name: { conversionId: created.id, name: "source_inspection" } },
+      data: { status: StageStatus.COMPLETED, completedAt: new Date(), inputHash: requestHash },
+    });
+    return created;
+  });
+
+  return res.status(201).json({ conversion: { id: conversion.id, status: conversion.status }, idempotentReplay: false });
 });
 
 conversionsRouter.get("/conversions/:conversionId", async (req, res) => {
