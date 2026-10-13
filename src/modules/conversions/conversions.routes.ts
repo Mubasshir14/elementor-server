@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
+import { pipeline } from "node:stream/promises";
 import { Prisma, ProjectRole, StageStatus, UploadStatus } from "../../generated/prisma/client.js";
 import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../../infrastructure/database/prisma.js";
 import { HttpError } from "../../middleware/errors.js";
+import { storage } from "../../infrastructure/storage/local.js";
 import { authenticatedUserId } from "../auth/auth.middleware.js";
 import { requireProjectRole } from "../projects/access.js";
 import { conversionSettingsBaseSchema } from "../capabilities/capabilities.schema.js";
@@ -40,6 +42,59 @@ async function authorizedConversion(id: string, userId: string) {
   await requireProjectRole(conversion.projectId, userId, Object.values(ProjectRole));
   return conversion;
 }
+
+/** Download the completed conversion's Elementor artifact (application/json). */
+conversionsRouter.get("/conversions/:conversionId/artifacts/download", async (req, res) => {
+  const id = conversionIdSchema.parse(req.params.conversionId);
+  const userId = authenticatedUserId(req);
+  const conversion = await authorizedConversion(id, userId);
+
+  // A download is only available for a genuinely completed job.
+  if (conversion.status !== "SUCCEEDED") {
+    throw new HttpError(
+      409,
+      "CONVERSION_NOT_COMPLETED",
+      "This conversion has not finished successfully yet, so there is no artifact to download.",
+    );
+  }
+
+  const artifact = await prisma.artifact.findFirst({
+    where: { conversionId: conversion.id, status: "READY" },
+    select: { id: true, fileName: true, contentType: true, sizeBytes: true, storageKey: true },
+  });
+  if (!artifact) {
+    throw new HttpError(
+      409,
+      "CONVERSION_NO_ARTIFACT",
+      "The conversion completed, but the Elementor artifact file was not persisted.",
+    );
+  }
+
+  // Verify the private object exists and the stored metadata is consistent.
+  const stored = await storage.stat(artifact.storageKey);
+  if (!stored || stored.sizeBytes !== Number(artifact.sizeBytes)) {
+    // Clean up the dangling DB record so it cannot be offered again.
+    await prisma.artifact.deleteMany({ where: { id: artifact.id, status: "READY" } }).catch(() => undefined);
+    throw new HttpError(
+      500,
+      "ARTIFACT_STORAGE_MISMATCH",
+      "The Elementor artifact file could not be read from storage; the download is unavailable.",
+    );
+  }
+
+  const stream = await storage.createReadStream(artifact.storageKey);
+  const rejectChars = new Set([0x0a, 0x0d, 0x22, 0x5c, 0x2f]);
+  const safeName = Array.from(artifact.fileName).map((ch) => rejectChars.has(ch.charCodeAt(0)) ? '_' : ch).join('');
+  res.status(200);
+  res.setHeader("Content-Type", artifact.contentType ?? "application/json");
+  res.setHeader("Content-Length", String(stored.sizeBytes));
+  res.setHeader(
+    "Content-Disposition",
+    `attachment; filename="${safeName}"; filename*=UTF-8''${encodeURIComponent(artifact.fileName)}`,
+  );
+  res.setHeader("Cache-Control", "private, no-store");
+  await pipeline(stream, res);
+});
 
 conversionsRouter.post("/projects/:projectId/conversions", async (req, res) => {
   const body = createSchema.parse(req.body);

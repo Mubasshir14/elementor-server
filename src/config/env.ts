@@ -39,6 +39,7 @@ export const envSchema = z.object({
   AI_API_KEY: z.string().optional(),
   AI_MODEL: z.string().optional(),
   AI_BASE_URL: z.string().optional(),
+  AI_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(5_000).max(300_000).default(60_000),
   SITE_CREDENTIAL_ENCRYPTION_KEY: z.string().optional(),
   CONVERSION_WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(2),
   CONVERSION_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(5).default(3),

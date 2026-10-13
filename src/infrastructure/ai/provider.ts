@@ -96,6 +96,13 @@ export async function requestConversionCompletion(request: AiCompletionRequest):
   }
   const baseUrl = resolveBaseUrl(provider);
   const messages = buildConversionMessages(request);
+
+  // A bounded deadline. If the provider does not respond in time the request is
+  // aborted and surfaced as an AI provider failure, so an unresponsive AI call can
+  // never hold a conversion worker hostage (stale-job recovery remains bounded).
+  const timeoutMs = Number(process.env.AI_REQUEST_TIMEOUT_MS ?? env.AI_REQUEST_TIMEOUT_MS ?? 60_000);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   let response: Response;
   try {
     response = await fetch(`${baseUrl}/chat/completions`, {
@@ -110,9 +117,19 @@ export async function requestConversionCompletion(request: AiCompletionRequest):
         temperature: 0,
         max_tokens: request.maxOutputTokens ?? 8192,
       }),
+      signal: controller.signal,
     });
   } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new HttpError(
+        502,
+        "AI_PROVIDER_TIMEOUT",
+        `The AI provider did not respond within ${timeoutMs}ms. The conversion will be retried or marked failed after the retry limit is reached.`,
+      );
+    }
     throw new HttpError(502, "AI_PROVIDER_UNREACHABLE", `The AI provider could not be reached: ${error instanceof Error ? error.message : "unknown error"}`);
+  } finally {
+    clearTimeout(timeout);
   }
   if (!response.ok) {
     const detail = await response.text().catch(() => "");
