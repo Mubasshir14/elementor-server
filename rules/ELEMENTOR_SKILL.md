@@ -45,8 +45,24 @@ description: Concise rules for turning the canonical DIR (produced by the Figma/
 ## 5. Output contract
 
 15. Output one native Elementor JSON document and nothing else — no Markdown fences, comments, or explanations.
+    The top-level envelope MUST be exactly (per the official Elementor Data Structure docs):
+    `{ "title": "<page title>", "type": "page", "version": "0.4", "page_settings": [] | {}, "content": [ ... ] }`.
+    - `title`: non-empty string (use the DIR `meta.title` or page name).
+    - `type`: the Elementor document type. For landing pages this is the literal `"page"`.
+      Valid values include `page`, `post`, `header`, `footer`, `popup`, `error-404`, `section`, `single`, `archive`, `search`.
+      An envelope without `type` is rejected by the Elementor Template Library as "Invalid template type".
+    - `version`: the literal string `"0.4"` (the current Elementor data-structure version).
+    - `page_settings`: `[]` when the page has no settings, otherwise an object of key/value settings.
+    - `content`: array of top-level containers, one per DIR section, in DIR order.
 16. Use deterministic, stable IDs derived from the DIR node IDs so repeated conversions of the same DIR produce identical output. No random or timestamp-based IDs.
-17. Every widget must carry a valid `widgetType` and a `settings` object whose keys are real Elementor controls. Abort rather than emit an unknown control.
-18. Keep the top-level document well-formed: a `content` array of sections/containers, each with `elType`, and widgets nested only where Elementor allows them.
+17. Every element MUST define `id`, `elType`, `settings`, and `elements`:
+    - Section wrappers: `elType` `"container"` (modern) or `"section"` + `"column"` (legacy layouts only).
+    - Widgets: `elType` `"widget"` with a valid `widgetType` and a `settings` object whose keys are real Elementor controls. Abort rather than emit an unknown control.
+    - `settings` is `{}` when empty (Elementor exports `[]`; both are accepted on import).
+    - `elements` is always an array (`[]` for leaf widgets).
+18. Preserve every DIR section: each DIR `section` becomes exactly one top-level container in `content`,
+    in the same order, with its `role` preserved in the container settings as `_section_role`
+    (plus `_css_id`/`css_classes` when the DIR provides one). Emitting only header/footer while
+    dropping hero/features/pricing/cta sections is a FAILURE — never close `content` early.
 19. Do not claim support for a widget, control, or Elementor version you have not been given. When unsure, choose the closest core Elementor widget and note the limitation.
 20. If the DIR itself is invalid, stop and report the validation failure instead of producing partial or invented Elementor output.

@@ -13,7 +13,7 @@ export async function claimNextConversion(workerId: string): Promise<string | nu
       SELECT "id"
       FROM "ConversionJob"
       WHERE "status" = 'QUEUED'::"ConversionStatus"
-        AND "availableAt" <= NOW()
+        AND "availableAt" <= (NOW() AT TIME ZONE 'UTC')
         AND "cancelRequestedAt" IS NULL
       ORDER BY "availableAt" ASC, "createdAt" ASC
       LIMIT 1
@@ -47,7 +47,7 @@ export async function recoverStaleConversions(maxAttempts: number): Promise<numb
       SELECT "id", "attempt"
       FROM "ConversionJob"
       WHERE "status" = 'RUNNING'::"ConversionStatus"
-        AND "lockedAt" < NOW() - (${STALE_JOB_MS} * INTERVAL '1 millisecond')
+        AND "lockedAt" < (NOW() AT TIME ZONE 'UTC') - (${STALE_JOB_MS} * INTERVAL '1 millisecond')
       ORDER BY "lockedAt" ASC
       FOR UPDATE SKIP LOCKED
     `;

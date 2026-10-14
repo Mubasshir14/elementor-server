@@ -31,11 +31,14 @@ import { generateElementorOutput } from "../src/modules/conversions/elementor-ge
 import {
   validateElementorOutput,
   assertValidElementorOutput,
+  assertElementorCoversDirSections,
+  assertElementorJsonRoundTrip,
 } from "../src/modules/conversions/elementor-output-schema.js";
 import {
   runConversionPipeline,
   persistElementorArtifact,
 } from "../src/modules/conversions/conversion-pipeline.js";
+import * as aiProvider from "../src/infrastructure/ai/provider.js";
 import { resetRuleCacheForTests } from "../src/modules/rules/rule-loader.js";
 
 const app = createApp();
@@ -68,17 +71,84 @@ const validDir = {
 };
 
 const validElementorOutput = {
+  title: "Landing",
+  type: "page",
+  version: "0.4",
+  page_settings: [],
   content: [
     {
       id: "sec-hero",
-      elType: "e-section",
-      settings: { background_color: "#ffffff" },
+      elType: "container",
+      isInner: false,
+      settings: { _section_role: "hero", _css_id: "sec-hero" },
       elements: [
         {
           id: "wdg-heading",
-          elType: "e-heading",
+          elType: "widget",
+          isInner: false,
           widgetType: "heading",
           settings: { title: "Hello", header_size: "h1" },
+          elements: [],
+        },
+      ],
+    },
+  ],
+};
+
+/** The reported elementor14.json failure shape: valid JSON, import-rejected. */
+const elementor14FailureShape = {
+  content: [
+    {
+      id: "section-header",
+      elType: "container",
+      settings: {},
+      elements: [
+        {
+          id: "btn-1",
+          elType: "widget",
+          widgetType: "button",
+          settings: { text: "Home" },
+          elements: [],
+        },
+      ],
+    },
+    {
+      id: "section-footer",
+      elType: "container",
+      settings: {},
+      elements: [
+        {
+          id: "txt-1",
+          elType: "widget",
+          widgetType: "text-editor",
+          settings: { editor: "<p>Footer</p>" },
+          elements: [],
+        },
+      ],
+    },
+  ],
+};
+
+/** Genuine Elementor-exported reference shape (developer docs, General Structure). */
+const genuineElementorReference = {
+  title: "Sample Page",
+  type: "page",
+  version: "0.4",
+  page_settings: [],
+  content: [
+    {
+      id: "6af611eb",
+      elType: "container",
+      isInner: false,
+      settings: [],
+      elements: [
+        {
+          id: "6a637978",
+          elType: "widget",
+          widgetType: "heading",
+          isInner: false,
+          settings: { title: "Add Your Heading Text Here", align: "center" },
+          elements: [],
         },
       ],
     },
@@ -121,6 +191,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
   process.env.AI_PROVIDER = "disabled";
   process.env.AI_API_KEY = "";
   process.env.AI_MODEL = "";
@@ -139,27 +210,158 @@ describe("Elementor output validation (documented structural contract)", () => {
     expect(result.valid).toBe(true);
     expect(result.issues).toEqual([]);
     expect(result.output?.content).toHaveLength(1);
+    expect(result.output?.type).toBe("page");
+    expect(result.output?.version).toBe("0.4");
     const section = result.output?.content[0] as { elements?: unknown[] };
     expect(section.elements).toHaveLength(1);
+  });
+
+  it("accepts a genuine Elementor-exported reference shape (settings as [])", () => {
+    const result = validateElementorOutput(genuineElementorReference);
+    expect(result.valid).toBe(true);
+    expect(result.issues).toEqual([]);
+  });
+
+  it("rejects the reported elementor14.json shape: valid JSON is not importable without a template type", () => {
+    // Regression: elementor14.json parsed as JSON but Elementor rejected it
+    // with "Invalid template type" because the envelope had no type/title.
+    const result = validateElementorOutput(elementor14FailureShape);
+    expect(result.valid).toBe(false);
+    const codes = result.issues.map((i) => i.code);
+    expect(codes).toContain("ELEMENTOR_TITLE_MISSING");
+    expect(codes).toContain("ELEMENTOR_TYPE_MISSING");
+    expect(codes).toContain("ELEMENTOR_VERSION_MISSING");
+    expect(codes).toContain("ELEMENTOR_PAGE_SETTINGS_MISSING");
+  });
+
+  it("rejects unknown template types instead of guessing", () => {
+    const result = validateElementorOutput({
+      title: "X",
+      type: "elementor",
+      version: "0.4",
+      page_settings: [],
+      content: [],
+    });
+    expect(result.valid).toBe(false);
+    expect(result.issues[0]?.code).toBe("ELEMENTOR_TYPE_INVALID");
+  });
+
+  it("rejects unsupported versions, bad page_settings, elTypes, widget types, and missing widget settings", () => {
+    const badVersion = validateElementorOutput({
+      title: "X",
+      type: "page",
+      version: "9.9",
+      page_settings: [],
+      content: [],
+    });
+    expect(badVersion.issues[0]?.code).toBe("ELEMENTOR_VERSION_UNSUPPORTED");
+
+    const badSettings = validateElementorOutput({
+      title: "X",
+      type: "page",
+      version: "0.4",
+      page_settings: "nope",
+      content: [],
+    });
+    expect(badSettings.issues[0]?.code).toBe("ELEMENTOR_PAGE_SETTINGS_INVALID");
+
+    const badElType = validateElementorOutput({
+      title: "X",
+      type: "page",
+      version: "0.4",
+      page_settings: [],
+      content: [{ id: "a", elType: "e-section", settings: {}, elements: [] }],
+    });
+    expect(badElType.issues[0]?.code).toBe("ELEMENTOR_EL_TYPE_INVALID");
+
+    const badWidget = validateElementorOutput({
+      title: "X",
+      type: "page",
+      version: "0.4",
+      page_settings: [],
+      content: [
+        {
+          id: "a",
+          elType: "container",
+          settings: {},
+          elements: [{ id: "b", elType: "widget", widgetType: "super-carousel-9000", settings: {}, elements: [] }],
+        },
+      ],
+    });
+    expect(badWidget.issues[0]?.code).toBe("ELEMENTOR_WIDGET_TYPE_UNSUPPORTED");
+
+    const missingControl = validateElementorOutput({
+      title: "X",
+      type: "page",
+      version: "0.4",
+      page_settings: [],
+      content: [
+        {
+          id: "a",
+          elType: "container",
+          settings: {},
+          elements: [{ id: "b", elType: "widget", widgetType: "heading", settings: {}, elements: [] }],
+        },
+      ],
+    });
+    expect(missingControl.issues[0]?.code).toBe("ELEMENTOR_WIDGET_SETTING_MISSING");
+  });
+
+  it("detects missing DIR sections and verifies ordering + JSON round-trip", () => {
+    const dir = {
+      pages: [{ sections: [{ role: "hero" }, { role: "features" }, { role: "footer" }] }],
+    };
+    const partial = validateElementorOutput({
+      title: "Landing",
+      type: "page",
+      version: "0.4",
+      page_settings: [],
+      content: [
+        {
+          id: "sec-hero",
+          elType: "container",
+          settings: { _section_role: "hero" },
+          elements: [],
+        },
+        {
+          id: "sec-footer",
+          elType: "container",
+          settings: { _section_role: "footer" },
+          elements: [],
+        },
+      ],
+    });
+    expect(partial.valid).toBe(true);
+    const coverage = assertElementorCoversDirSections(partial.output!, dir);
+    expect(coverage.map((i) => i.code)).toContain("ELEMENTOR_SECTION_MISSING");
+    expect(assertElementorJsonRoundTrip(partial.output!)).toEqual([]);
   });
 
   it("rejects non-object roots and missing content arrays with actionable diagnostics", () => {
     expect(validateElementorOutput("nope").issues[0]?.code).toBe("ELEMENTOR_NOT_OBJECT");
     expect(validateElementorOutput(null).issues[0]?.code).toBe("ELEMENTOR_NOT_OBJECT");
-    const noContent = validateElementorOutput({ sections: [] });
-    expect(noContent.valid).toBe(false);
-    expect(noContent.issues[0]?.code).toBe("ELEMENTOR_CONTENT_NOT_ARRAY");
+    const noTitle = validateElementorOutput({ sections: [] });
+    expect(noTitle.valid).toBe(false);
+    expect(noTitle.issues[0]?.code).toBe("ELEMENTOR_TITLE_MISSING");
+    expect(noTitle.issues[1]?.code).toBe("ELEMENTOR_TYPE_MISSING");
+    expect(noTitle.issues[2]?.code).toBe("ELEMENTOR_VERSION_MISSING");
+    expect(noTitle.issues[3]?.code).toBe("ELEMENTOR_PAGE_SETTINGS_MISSING");
+    expect(noTitle.issues[4]?.code).toBe("ELEMENTOR_CONTENT_NOT_ARRAY");
   });
 
   it("identifies the failing path for malformed nodes, ids, types, and nesting", () => {
     const bad = {
+      title: "X",
+      type: "page",
+      version: "0.4",
+      page_settings: [],
       content: [
-        { elType: "e-section", settings: {} },
-        { id: "", elType: "e-section", settings: {} },
-        { id: "bad id!", elType: "e-section", settings: {} },
-        { id: "sec-3", elType: "", settings: "not-an-object" },
-        { id: "sec-3", elType: "e-section", settings: {} },
-        { id: "sec-5", elType: "e-section", settings: {}, elements: "nope" },
+        { elType: "container", settings: {}, elements: [] },
+        { id: "", elType: "container", settings: {}, elements: [] },
+        { id: "bad id!", elType: "container", settings: {}, elements: [] },
+        { id: "sec-3", elType: "", settings: "not-an-object", elements: [] },
+        { id: "sec-3", elType: "container", settings: {}, elements: [] },
+        { id: "sec-5", elType: "container", settings: {}, elements: "nope" },
         "not-a-node",
       ],
     };
@@ -178,25 +380,29 @@ describe("Elementor output validation (documented structural contract)", () => {
 
   it("recursively validates nested widgets with widgetType", () => {
     const nested = {
+      title: "X",
+      type: "page",
+      version: "0.4",
+      page_settings: [],
       content: [
         {
           id: "sec",
-          elType: "e-section",
+          elType: "container",
           settings: {},
-          elements: [{ id: "wid", elType: "e-heading", widgetType: 42, settings: {} }],
+          elements: [{ id: "wid", elType: "widget", widgetType: 42, settings: {}, elements: [] }],
         },
       ],
     };
     const result = validateElementorOutput(nested);
     expect(result.valid).toBe(false);
-    expect(result.issues[0]?.code).toBe("ELEMENTOR_WIDGET_TYPE_INVALID");
+    expect(result.issues[0]?.code).toBe("ELEMENTOR_WIDGET_TYPE_MISSING");
     expect(result.issues[0]?.path).toBe("content[0].elements[0].widgetType");
   });
 
   it("assertValidElementorOutput throws an actionable HttpError for invalid output", () => {
-    expect(() => assertValidElementorOutput({ content: [{ elType: "x" }] })).toThrowError(
-      /did not match the approved schema/,
-    );
+    expect(() =>
+      assertValidElementorOutput({ title: "X", type: "page", version: "0.4", page_settings: [], content: [{ elType: "x" }] }),
+    ).toThrowError(/did not match the approved schema/);
     expect(() => assertValidElementorOutput(validElementorOutput)).not.toThrow();
   });
 });
@@ -277,14 +483,16 @@ describe("Pipeline integration (validated DIR reaches generation)", () => {
   const snapshotKey = "imports/pipeline-ok/snapshot.json";
   const blockedSnapshotKey = "imports/pipeline-block/snapshot.json";
 
-  async function writeSnapshot(key: string) {
-    const bytes = Buffer.from(JSON.stringify({ pages: [], name: "source-snapshot" }), "utf8");
+  async function writeSnapshot(key: string, dirOrJson: unknown) {
+    const bytes = Buffer.from(typeof dirOrJson === "string" ? dirOrJson : JSON.stringify(dirOrJson), "utf8");
     const existing = await storage.stat(key);
     if (!existing) await storage.write(key, Readable.from([bytes]), bytes.length);
   }
 
   it("proceeds from a valid DIR to real generation and returns native Elementor output", async () => {
-    await writeSnapshot(snapshotKey);
+    await writeSnapshot(snapshotKey, {
+      pages: [{ sections: [{ role: "hero", children: [{ kind: "heading", text: "Hello", level: "h1" }] }] }],
+    });
     const fetchMock = stubFetch([
       () => JSON.stringify(validDir),
       () => JSON.stringify(validElementorOutput),
@@ -306,8 +514,30 @@ describe("Pipeline integration (validated DIR reaches generation)", () => {
   });
 
   it("blocks at source_ir_validation for an invalid DIR and never calls the generator", async () => {
-    await writeSnapshot(blockedSnapshotKey);
-    const fetchMock = stubFetch([() => JSON.stringify({ nope: true })]);
+    // Ensure the snapshot fixture exists so the pipeline can read the source
+    // design before it attempts to generate a canonical DIR.
+    await writeSnapshot(blockedSnapshotKey, {
+      pages: [
+        {
+          sections: [
+            {
+              role: "hero",
+              children: [{ kind: "heading", text: "Hello" }],
+            },
+          ],
+        },
+      ],
+    });
+
+    const invalidDir = JSON.stringify({ pages: [{ sections: "not-an-array" }] });
+
+    const requestCompletionSpy = vi.spyOn(aiProvider, "requestConversionCompletion");
+    requestCompletionSpy.mockResolvedValue({
+      text: invalidDir,
+      provider: "groq",
+      model: "test-model",
+      ruleVersions: [],
+    });
 
     const result = await runConversionPipeline(
       { sourceType: "figma", snapshotKey: blockedSnapshotKey },
@@ -318,12 +548,15 @@ describe("Pipeline integration (validated DIR reaches generation)", () => {
     expect(result.status).toBe("BLOCKED");
     if (result.status !== "BLOCKED") throw new Error("expected blocked");
     expect(result.stage).toBe("source_ir_validation");
-    expect(result.diagnostics[0]?.code).toContain("DIR_");
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.diagnostics[0]?.code).toBe("DIR_SECTIONS_NOT_ARRAY");
+    expect(requestCompletionSpy).toHaveBeenCalledTimes(1);
+    requestCompletionSpy.mockRestore();
   });
 
   it("propagates AI provider failures instead of marking success", async () => {
-    await writeSnapshot(snapshotKey);
+    await writeSnapshot(snapshotKey, {
+      pages: [{ sections: [{ role: "hero", children: [{ kind: "heading", text: "Hello" }] }] }],
+    });
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")));
     await expect(
       runConversionPipeline(

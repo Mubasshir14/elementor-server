@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { StageStatus, UploadStatus } from "./generated/prisma/client.js";
+import { Prisma, StageStatus, UploadStatus } from "./generated/prisma/client.js";
 import { env } from "./config/env.js";
 import { prisma } from "./infrastructure/database/prisma.js";
 import { storage } from "./infrastructure/storage/local.js";
@@ -51,6 +51,27 @@ async function cancelIfRequested(conversionId: string, workerId: string): Promis
     });
   });
   return true;
+}
+
+// Diagnostics honesty: a missing-source diagnostic must NEVER coexist with a
+// successful outcome. On SUCCEEDED we persist a neutral completion marker (the UI
+// only renders entries that carry a human message, so this stays invisible). On
+// BLOCKED we persist the pipeline's real diagnostics. The missing-source fallback
+// (`diagnostic`) is used only when the pipeline never ran (null result) — a path
+// that always marks the job BLOCKED, never SUCCEEDED. Exported as a pure function
+// so the invariant is directly unit-testable.
+export function computePersistedDiagnostics(
+  pipelineStatus: "SUCCEEDED" | "BLOCKED" | null,
+  pipelineDiagnostics: unknown[] | null,
+  missingSourceDiagnostic: unknown,
+): { diagnostics: Prisma.InputJsonValue[]; success: boolean } {
+  const success = pipelineStatus === "SUCCEEDED";
+  const diagnostics: Prisma.InputJsonValue[] = success
+    ? [{ code: "UPSTREAM_STAGE_COMPLETED" }]
+    : pipelineStatus === "BLOCKED"
+      ? ((pipelineDiagnostics ?? []) as Prisma.InputJsonValue[])
+      : [missingSourceDiagnostic as Prisma.InputJsonValue];
+  return { diagnostics, success };
 }
 
 export async function processConversion(conversionId: string, workerId: string): Promise<void> {
@@ -188,22 +209,37 @@ export async function processConversion(conversionId: string, workerId: string):
       }
     }
 
-    const pipelineDiagnostics = pipelineResult?.status === "BLOCKED" ? pipelineResult.diagnostics : null;
-    const diagnostic = pipelineResult?.status === "BLOCKED"
-      ? {
-          code: pipelineResult.diagnostics[0]?.code ?? "CONVERSION_BLOCKED",
-          severity: "error",
-          message: pipelineResult.diagnostics[0]?.message ?? "Conversion was blocked.",
-          stage: pipelineResult.stage,
-        }
-      : {
-          code: "SOURCE_ANALYSIS_RULES_MISSING",
-          severity: "error",
-          message: "Conversion stopped because this job has no validated source import; the Markdown-driven pipeline requires a ready source snapshot for the recorded source type.",
-          stage: "source_ir_validation",
-        };
-
     const success = pipelineResult?.status === "SUCCEEDED";
+
+    // The single fallback diagnostic used only when the pipeline never ran
+    // (pipelineResult === null). On BLOCKED we surface the pipeline's real first
+    // diagnostic; otherwise this missing-source error. This is the value passed
+    // as the fallback to computePersistedDiagnostics below.
+    const diagnostic =
+      pipelineResult?.status === "BLOCKED"
+        ? {
+            code: pipelineResult.diagnostics[0]?.code ?? "CONVERSION_BLOCKED",
+            severity: "error",
+            message: pipelineResult.diagnostics[0]?.message ?? "Conversion was blocked.",
+            stage: pipelineResult.stage,
+          }
+        : {
+            code: "SOURCE_ANALYSIS_RULES_MISSING",
+            severity: "error",
+            message:
+              "Conversion stopped because this job has no validated source import; the Markdown-driven pipeline requires a ready source snapshot for the recorded source type.",
+            stage: "source_ir_validation",
+          };
+
+    // Diagnostics honesty: the persisted stage/report diagnostics never include a
+    // missing-source error alongside a successful outcome. See
+    // computePersistedDiagnostics for the exact invariant (unit-tested).
+    const { diagnostics: persistedDiagnostics } = computePersistedDiagnostics(
+      pipelineResult?.status ?? null,
+      pipelineResult?.status === "BLOCKED" ? pipelineResult.diagnostics : null,
+      diagnostic,
+    );
+
 
     // Persistence-first ordering: a conversion may only be marked SUCCEEDED
     // after the validated Elementor output is durably stored and the Artifact
@@ -263,7 +299,7 @@ export async function processConversion(conversionId: string, workerId: string):
         data: {
           status: success ? StageStatus.COMPLETED : StageStatus.BLOCKED,
           inputHash: uploadSha256,
-          diagnostics: pipelineDiagnostics ?? [diagnostic],
+          diagnostics: persistedDiagnostics,
           completedAt,
         },
       });
@@ -289,10 +325,10 @@ export async function processConversion(conversionId: string, workerId: string):
         where: { conversionId },
         create: {
           conversionId,
-          diagnostics: pipelineDiagnostics ?? [diagnostic],
+          diagnostics: persistedDiagnostics,
         },
         update: {
-          diagnostics: pipelineDiagnostics ?? [diagnostic],
+          diagnostics: persistedDiagnostics,
         },
       });
     });

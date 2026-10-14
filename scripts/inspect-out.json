@@ -1,0 +1,71 @@
+{
+  "found": true,
+  "conversionId": "cmv6mtss20003korfl7asgn1d",
+  "projectId": "cmv6msvsw0001korfvokk0eq7",
+  "uploadId": "90de9803-4619-4735-9e6b-af3cfa4d6bbb",
+  "uploadSourceImportId": "cmv6mt3da0002korf4tb55uoa",
+  "status": "SUCCEEDED",
+  "errorCode": null,
+  "errorMessage": null,
+  "attempt": 1,
+  "createdAt": "2026-10-13T12:03:21.458Z",
+  "updatedAt": "2026-10-13T12:03:31.621Z",
+  "stages": [
+    {
+      "name": "source_inspection",
+      "status": "COMPLETED",
+      "outputKey": null,
+      "diagnostics": null
+    },
+    {
+      "name": "source_ir_validation",
+      "status": "COMPLETED",
+      "outputKey": null,
+      "diagnostics": [
+        {
+          "code": "SOURCE_ANALYSIS_RULES_MISSING",
+          "stage": "source_ir_validation",
+          "message": "Conversion stopped because this job has no validated source import; the Markdown-driven pipeline requires a ready source snapshot for the recorded source type.",
+          "severity": "error"
+        }
+      ]
+    },
+    {
+      "name": "target_ir_generation",
+      "status": "COMPLETED",
+      "outputKey": "conversions/cmv6msvsw0001korfvokk0eq7/cmv6mtss20003korfl7asgn1d/elementor.json",
+      "diagnostics": [
+        {
+          "code": "UPSTREAM_STAGE_COMPLETED"
+        }
+      ]
+    }
+  ],
+  "validationReport": {
+    "diagnostics": [
+      {
+        "code": "SOURCE_ANALYSIS_RULES_MISSING",
+        "stage": "source_ir_validation",
+        "message": "Conversion stopped because this job has no validated source import; the Markdown-driven pipeline requires a ready source snapshot for the recorded source type.",
+        "severity": "error"
+      }
+    ]
+  },
+  "artifacts": [
+    {
+      "id": "cmv6mu0m10000gwrf9kg0wfle",
+      "status": "READY",
+      "fileName": "elementor.json",
+      "contentType": "application/json",
+      "sizeBytes": "959",
+      "sha256": "e0321fa308467274c7d1c5d0fa88ef1c71607e0eca5d559ec0ff1c4c4bdc8498",
+      "storageKey": "conversions/cmv6msvsw0001korfvokk0eq7/cmv6mtss20003korfl7asgn1d/elementor.json"
+    }
+  ],
+  "b2Object": {
+    "storageKey": "conversions/cmv6msvsw0001korfvokk0eq7/cmv6mtss20003korfl7asgn1d/elementor.json",
+    "exists": true,
+    "sizeBytes": 959,
+    "sizeMatchesRecord": true
+  }
+}

@@ -7,7 +7,7 @@ vi.mock("../src/infrastructure/database/prisma.js", () => ({
     session: { findFirst: vi.fn() },
     projectMember: { findUnique: vi.fn() },
     sourceImport: { findFirst: vi.fn() },
-    conversionJob: { findUnique: vi.fn(), create: vi.fn(), updateMany: vi.fn(), findFirst: vi.fn() },
+    conversionJob: { findUnique: vi.fn(), create: vi.fn(), updateMany: vi.fn(), findFirst: vi.fn(), findMany: vi.fn() },
     conversionStage: { createMany: vi.fn(), update: vi.fn(), updateMany: vi.fn(), findMany: vi.fn() },
     ruleFileVersion: { upsert: vi.fn() },
     conversionRuleVersion: { create: vi.fn() },
@@ -123,6 +123,7 @@ beforeEach(() => {
   vi.mocked(storage.createReadStream).mockReset();
   vi.mocked(prisma.conversionJob.findUnique).mockReset();
   vi.mocked(prisma.conversionJob.findFirst).mockReset();
+  vi.mocked(prisma.conversionJob.findMany).mockReset();
   vi.mocked(prisma.conversionJob.updateMany).mockReset();
   vi.mocked(prisma.conversionStage.updateMany).mockReset();
   vi.mocked(prisma.artifact.findFirst).mockReset();
@@ -259,5 +260,75 @@ describe("Conversion retry endpoint", () => {
     expect(res.status).toBe(409);
     expect(body.error?.code).toBe("CONVERSION_NOT_RETRYABLE");
   });
+
+describe("Project conversion history endpoint", () => {
+  const PROJECT_ID = "cxxxxxxxxxxxxxxxxxxxxxxxx";
+
+  it("returns an empty list for a project with no conversion jobs", async () => {
+    vi.mocked(prisma.conversionJob.findMany).mockResolvedValue([]);
+    const res = await request(app)
+      .get(`/api/v1/projects/${PROJECT_ID}/conversions`)
+      .set("Authorization", `Bearer ${TOKEN}`);
+    expect(res.status).toBe(200);
+    const body = res.body as { conversions: unknown[] };
+    expect(body.conversions).toEqual([]);
+    expect(prisma.conversionJob.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { projectId: PROJECT_ID } }),
+    );
+  });
+
+  it("returns the real persisted jobs (with distinct ids) for a project with multiple jobs", async () => {
+    vi.mocked(prisma.conversionJob.findMany).mockResolvedValue([
+      { id: "cjobone0000000000000000000", status: "SUCCEEDED", sourcePlatform: "REACT_NEXT_ZIP", createdAt: new Date("2026-10-01T00:00:00.000Z"), updatedAt: new Date("2026-10-01T00:05:00.000Z"), artifacts: [{ id: "cart000000000000000000000" }] },
+      { id: "cjobtwo0000000000000000000", status: "QUEUED", sourcePlatform: "REACT_NEXT_ZIP", createdAt: new Date("2026-10-02T00:00:00.000Z"), updatedAt: new Date("2026-10-02T00:00:00.000Z"), artifacts: [] },
+    ]);
+    const res = await request(app)
+      .get(`/api/v1/projects/${PROJECT_ID}/conversions`)
+      .set("Authorization", `Bearer ${TOKEN}`);
+    expect(res.status).toBe(200);
+    const body = res.body as { conversions: Array<{ id: string; status: string; hasArtifact: boolean }> };
+    expect(body.conversions).toHaveLength(2);
+    // The returned ids are genuine ConversionJob ids, NOT the project id.
+    expect(body.conversions.map((c) => c.id)).toEqual(["cjobone0000000000000000000", "cjobtwo0000000000000000000"]);
+    expect(body.conversions.every((c) => c.id !== PROJECT_ID)).toBe(true);
+    expect(body.conversions[0]?.hasArtifact).toBe(true);
+    expect(body.conversions[1]?.hasArtifact).toBe(false);
+  });
+
+  it("returns a single job for a project with one job", async () => {
+    vi.mocked(prisma.conversionJob.findMany).mockResolvedValue([
+      { id: "cjobone0000000000000000000", status: "RUNNING", sourcePlatform: "FIGMA", createdAt: new Date("2026-10-03T00:00:00.000Z"), updatedAt: new Date("2026-10-03T00:01:00.000Z"), artifacts: [] },
+    ]);
+    const res = await request(app)
+      .get(`/api/v1/projects/${PROJECT_ID}/conversions`)
+      .set("Authorization", `Bearer ${TOKEN}`);
+    expect(res.status).toBe(200);
+    const body = res.body as { conversions: Array<{ id: string; status: string }> };
+    expect(body.conversions).toHaveLength(1);
+    expect(body.conversions[0]?.id).toBe("cjobone0000000000000000000");
+  });
+
+  it("404s a conversion that belongs to another user's project (no membership)", async () => {
+    // The signed-in user is not a member of the foreign project.
+    vi.mocked(prisma.projectMember.findUnique).mockResolvedValue(null);
+    const res = await request(app)
+      .get(`/api/v1/projects/cforeignproject000000000/conversions`)
+      .set("Authorization", `Bearer ${TOKEN}`);
+    const body = res.body as { error?: { code: string } };
+    expect(res.status).toBe(404);
+    expect(body.error?.code).toBe("PROJECT_NOT_FOUND");
+  });
+
+  it("404s an unknown conversion id (details endpoint uses the job id, not a project id)", async () => {
+    vi.mocked(prisma.conversionJob.findUnique).mockResolvedValue(null);
+    const res = await request(app)
+      .get(`/api/v1/conversions/cunknownconversion0000/`)
+      .set("Authorization", `Bearer ${TOKEN}`);
+    const body = res.body as { error?: { code: string } };
+    expect(res.status).toBe(404);
+    expect(body.error?.code).toBe("CONVERSION_NOT_FOUND");
+  });
+});
+
 });
 

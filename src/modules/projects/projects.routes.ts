@@ -39,7 +39,35 @@ projectsRouter.get("/:projectId", async (req, res) => {
   await requireProjectRole(id, userId, Object.values(ProjectRole));
   const project = await prisma.project.findUnique({
     where: { id },
-    select: { id: true, name: true, createdAt: true, updatedAt: true },
+    select: {
+      id: true,
+      name: true,
+      createdAt: true,
+      updatedAt: true,
+      uploads: {
+        where: { status: "READY" },
+        orderBy: { completedAt: "desc" },
+        select: {
+          id: true,
+          fileName: true,
+          sourceType: true,
+          detectedFramework: true,
+          sourceImportId: true,
+          completedAt: true,
+        },
+      },
+      sourceImports: {
+        where: { status: "READY" },
+        orderBy: { createdAt: "desc" },
+        select: {
+          id: true,
+          kind: true,
+          fileName: true,
+          inputUrl: true,
+          createdAt: true,
+        },
+      },
+    },
   });
   if (!project) throw new HttpError(404, "PROJECT_NOT_FOUND", "Project was not found");
   res.json({ project });

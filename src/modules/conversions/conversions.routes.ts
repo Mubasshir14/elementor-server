@@ -43,6 +43,41 @@ async function authorizedConversion(id: string, userId: string) {
   return conversion;
 }
 
+// Conversion history for a project. Returns the real persisted ConversionJob rows
+// that belong to the requested project (queried by the projectId foreign key, never
+// by assuming a job id equals a project or upload id). Ownership is enforced via
+// requireProjectRole so a user only sees history for projects they are a member of.
+conversionsRouter.get("/projects/:projectId/conversions", async (req, res) => {
+  const projectId = z.string().cuid().parse(req.params.projectId);
+  await requireProjectRole(projectId, authenticatedUserId(req), Object.values(ProjectRole));
+  const jobs = await prisma.conversionJob.findMany({
+    where: { projectId },
+    orderBy: { createdAt: "desc" },
+    select: {
+      id: true,
+      status: true,
+      sourcePlatform: true,
+      createdAt: true,
+      updatedAt: true,
+      artifacts: {
+        where: { status: "READY" },
+        select: { id: true },
+        take: 1,
+      },
+    },
+  });
+  res.json({
+    conversions: jobs.map((job) => ({
+      id: job.id,
+      status: job.status,
+      sourcePlatform: job.sourcePlatform,
+      hasArtifact: job.artifacts.length > 0,
+      createdAt: job.createdAt,
+      updatedAt: job.updatedAt,
+    })),
+  });
+});
+
 /** Download the completed conversion's Elementor artifact (application/json). */
 conversionsRouter.get("/conversions/:conversionId/artifacts/download", async (req, res) => {
   const id = conversionIdSchema.parse(req.params.conversionId);

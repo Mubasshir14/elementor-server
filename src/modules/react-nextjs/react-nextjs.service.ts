@@ -24,6 +24,7 @@ import type {
 } from "./react-nextjs.types.js";
 import { inspectZip } from "./react-nextjs.validator.js";
 import { isGeneratedArchivePath } from "./archive-entry-policy.js";
+export { projectReactSnapshotForAi, type ProjectedReactSnapshot } from "./react-nextjs.projection.js";
 
 const MAX_PACKAGE_JSON_BYTES = 1024 * 1024;
 const MAX_SOURCE_FILE_BYTES = 192 * 1024;
@@ -411,8 +412,57 @@ function extractSectionsFromPageSource(
     const tagName = (match[1] ?? "section").toLowerCase();
     const attrs = match[2] ?? "";
     const inner = match[3] ?? "";
+    // FIX (elementor14 header/footer-only artifact): a `<main>` wrapper whose
+    // inner content is composed of component references (e.g. `<Hero />`,
+    // `<Features />`) previously hit `continue` here, discarding ALL nested
+    // page sections while header/footer from layout.tsx survived. Instead,
+    // treat the wrapper as a container: inline each referenced component's
+    // analyzed structure as its own section at this position.
     if (tagName === "main" && /<section\b/i.test(inner)) {
-      continue;
+      const childComponents = extractChildComponentReferences(inner);
+      let inlined = false;
+      for (const compName of childComponents) {
+        const comp = componentsByName.get(compName);
+        if (!comp) continue;
+        if (
+          comp.headings.length === 0 &&
+          comp.paragraphs.length === 0 &&
+          comp.buttons.length === 0 &&
+          comp.navItems.length === 0 &&
+          comp.images.length === 0 &&
+          comp.forms.length === 0
+        ) {
+          continue;
+        }
+        index += 1;
+        sections.push({
+          id: `${routeId}-sec-${index}`,
+          name: comp.name,
+          role: comp.roleHint ?? inferRoleFromNameOrTag(comp.name, "section", comp.headings),
+          tagName: "section",
+          className: comp.className,
+          layoutHint: inferLayoutFromClassName(comp.className),
+          headings: comp.headings,
+          paragraphs: comp.paragraphs,
+          buttons: comp.buttons,
+          navItems: comp.navItems,
+          images: comp.images,
+          forms: comp.forms,
+          childComponents: [comp.name],
+        });
+        inlined = true;
+        if (sections.length >= 16) break;
+      }
+      if (inlined) continue;
+      // No analyzable child components: fall through and parse inner landmarks
+      // individually instead of swallowing them inside one wrapper section.
+      const innerSections = extractSectionsFromPageSource(routeId, routeName, inner, componentsByName);
+      for (const s of innerSections) {
+        if (sections.length >= 16) break;
+        index += 1;
+        sections.push({ ...s, id: `${routeId}-sec-${index}` });
+      }
+      if (innerSections.length > 0) continue;
     }
     const extracted = extractElementsFromSource(inner);
     const childComponents = extractChildComponentReferences(inner);
@@ -438,6 +488,18 @@ function extractSectionsFromPageSource(
       extracted.forms.length === 0 &&
       childComponents.length === 0
     ) {
+      // A landmark with no direct copy may still wrap nested sections (e.g. a
+      // `<div className="page">` around component calls). Recurse so nested
+      // landmarks are not silently dropped.
+      if (tagName === "main" || tagName === "article") {
+        const innerSections = extractSectionsFromPageSource(routeId, routeName, inner, componentsByName);
+        for (const s of innerSections) {
+          if (sections.length >= 16) break;
+          index += 1;
+          sections.push({ ...s, id: `${routeId}-sec-${index}` });
+        }
+        if (innerSections.length > 0) continue;
+      }
       continue;
     }
 

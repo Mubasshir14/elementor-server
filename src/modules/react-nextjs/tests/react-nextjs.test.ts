@@ -280,7 +280,7 @@ describe("React / Next.js ZIP inspection, bounded static analysis, and conversio
     };
 
     const validElementorResponse = {
-      type: "elementor",
+      type: "page",
       version: "0.4",
       title: "next-landing",
       page_settings: {},
